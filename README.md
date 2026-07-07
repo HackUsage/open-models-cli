@@ -101,6 +101,43 @@ System-Kontext injiziert (CLAUDE.md-Aequivalent, nur Einzel-Chat). `/todo add|do
 sie zu loeschen, `/history search <begriff>` durchsucht das Archiv. Uebersprungen: volles
 typisiertes Memory-System, gleichzeitige benannte Sessions (Architektur-Mismatch), Wissensgraph.
 
+## Claude Code CLI vs. Terminal-Profil -- Nutzerkomfort (Stand nach Phase 1-8)
+
+Zweite Vergleichsrunde, diesmal NICHT nach rohen Faehigkeiten sortiert, sondern nach dem, was
+den Alltag beim Tippen/Lesen angenehmer macht. Nichts davon ist umgesetzt -- reine Liste fuer
+eine spaetere Entscheidung, was sich lohnt.
+
+1. **Markdown-Rendering** -- fett/kursiv/Listen/Code-Bloecke mit Syntax-Highlighting im Ausgabe-
+   Stream. Hier: reiner Text-Stream, Sternchen/Backticks bleiben sichtbare Zeichen.
+2. **Diff-Ansicht bei Edits** -- farbige +/- Zeilen wie `git diff`. Hier: nur die gekuerzte
+   old_string/new_string-Anzeige aus Phase-9-Kuerzung, kein echtes Zeilen-Diff.
+3. **Interaktive Bestaetigungs-UI** -- Pfeiltasten-Menue (Allow once/Always/Reject) pro Tool-Aufruf.
+   Hier: reine y/N-Texteingabe (und im Swarm/Hive jetzt oft gar keine Nachfrage mehr, siehe Phase 9).
+4. **Tastenkuerzel** -- Doppel-Esc fuer Verlauf zurueckspulen, Shift+Tab fuer Modus-Wechsel,
+   Strg+R fuer Bash-History-Suche. Hier: nur Enter zum Absenden + Tab-Completion (Phase 7).
+5. **Spinner mit rotierendem Zeichen** waehrend des Wartens. Hier: Sekunden-Heartbeat-Text
+   (Phase 9), kein animiertes Symbol -- funktional aehnlich, optisch schlichter.
+6. **Bilder/Screenshots direkt einfuegen** (Copy-Paste in den Prompt). Hier: reines Text-Tool,
+   kein Bild-Input moeglich.
+7. **@-Datei-Erwaehnung mit Live-Vorschau-Popup** waehrend des Tippens. Hier: Tab-Completion
+   vervollstaendigt Pfade, zeigt aber keine Vorschau-Liste waehrend des Tippens an.
+8. **Strukturierte Fehlermeldungen** (z.B. mit Link zur Doku, eingeordneter Statuscode-Text).
+   Hier: rohe `err.message`-Ausgabe des jeweiligen Anbieters.
+9. **Mehrere Undo-/Checkpoint-Stufen** pro Datei. Hier: `/undo` kennt nur EINEN Schritt zurueck.
+10. **Erststart-Assistent** (fragt Projekt-Typ/Berechtigungen ab). Hier: direkter Rohstart,
+    Banner zeigt nur den erkannten Projekt-Typ an, fragt aber nichts ab.
+11. **Live-Statusleiste** (Branch, Modell, Kontext-Auslastung staendig sichtbar). Hier: Infos
+    nur einmalig im Start-Banner, danach muessen `/usage`/`/settings` explizit aufgerufen werden.
+12. **Verlaufssuche mit Vorschau/Sprung zur Stelle**. Hier: `/history search` gibt nur einen
+    Text-Dump der Treffer aus, kein Sprung in die Original-Session.
+13. **Mehrere parallele Sessions/Tabs** im selben Fenster. Hier: ein einzelner Prozess, eine
+    Sitzung gleichzeitig.
+
+Einordnung: Punkte 1-2 (Rendering/Diff) waeren die groessten Umbauten (Streaming-Architektur
+muesste puffern statt Token-fuer-Token auszugeben) -- siehe bereits in Phase 7 zurueckgestelltes
+Item. Punkte 4/6/7/13 haetten TTY-Raw-Mode bzw. Multi-Prozess-Architektur zur Voraussetzung.
+Punkte 3/9/11 waeren mit vertretbarem Aufwand nachruestbar, falls gewuenscht.
+
 **Redundanz-Audit (auf Nutzerwunsch):** geprueft, ob Befehle sich ueberfluessig ueberschneiden.
 Ergebnis: keiner ist rein redundant, alle drei potenziellen Kandidaten haben einen echten,
 eigenen Zweck -- `/agent` (genau eine Rolle, ein Zug, kein Pipeline-Overhead) vs. `/swarm`
