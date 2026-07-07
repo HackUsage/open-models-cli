@@ -83,6 +83,14 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
 
   let dispatchHappened = false;
   let result = null;
+  // Eindeutige ID pro Worker-INSTANZ (nicht pro Rollenname!) -- derselbe Rollenname (z.B.
+  // "coder") kann in einem einzigen dispatch_agents-Aufruf mehrfach gleichzeitig vorkommen
+  // (mehrere Teilaufgaben an dieselbe Rolle) oder ueber einen Coordinator-Neustart hinweg
+  // erneut auftauchen. Ein Aufrufer (index.js), der z.B. einen Wartesymbol-Timer pro Worker
+  // fuehrt, braucht dafuer einen Schluessel, der NICHT einfach role.name ist -- sonst
+  // ueberschreibt eine zweite gleichnamige Rolle den Timer-Handle der ersten, ohne ihn zu
+  // stoppen (Leak: der alte Timer laeuft fuer immer weiter).
+  let workerSeq = 0;
 
   for (let attempt = 1; attempt <= MAX_COORDINATOR_ATTEMPTS && !dispatchHappened; attempt++) {
     onAgentStart(coordinatorRole);
@@ -130,7 +138,8 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
             if (!role) {
               return { role: a.role, label: a.role, error: `Rolle "${a.role}" nicht gefunden.` };
             }
-            onWorkerStart(role, a.task);
+            const workerId = `${role.name}#${workerSeq++}`;
+            onWorkerStart(role, a.task, workerId);
             const workerConfig = { ...config, activeModel: role.model };
             const workerTools = role.readOnly ? buildToolDefinitions(config.projectRoot, { readOnly: true }) : fileTools;
             let text = '';
@@ -152,14 +161,14 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
               });
               if (!text.trim() && !toolCallHappened) {
                 const warning = 'LEER: Modell hat weder Text noch Tool-Aufrufe geliefert (moeglicher Modell-Aussetzer).';
-                onWorkerDone(role, text, warning);
+                onWorkerDone(role, text, warning, workerId);
                 return { role: role.name, label: role.label, error: warning };
               }
-              onWorkerDone(role, text, null);
+              onWorkerDone(role, text, null, workerId);
               return { role: role.name, label: role.label, text };
             } catch (err) {
               const message = err.message || String(err);
-              onWorkerDone(role, '', message);
+              onWorkerDone(role, '', message, workerId);
               return { role: role.name, label: role.label, error: message };
             }
           })

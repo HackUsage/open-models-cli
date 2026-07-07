@@ -928,14 +928,14 @@ async function runHiveCommand(task) {
         if (firstOutput) { stopWaiting(true); firstOutput = false; }
         process.stdout.write(delta);
       },
-      onWorkerStart: (role, task) => {
+      onWorkerStart: (role, task, workerId) => {
         workerCount++;
         console.log(`\n${ANSI.accent}[Worker] ${role.label} (${role.model}) startet: ${task}${ANSI.reset}`);
-        workerWaiters.set(role.name, makeWaitIndicator(`  [${role.label}] arbeitet noch`, { overwrite: false, intervalMs: 15000 }));
+        workerWaiters.set(workerId, makeWaitIndicator(`  [${role.label}] arbeitet noch`, { overwrite: false, intervalMs: 15000 }));
       },
-      onWorkerDone: (role, text, error) => {
-        const stop = workerWaiters.get(role.name);
-        if (stop) { stop(false); workerWaiters.delete(role.name); }
+      onWorkerDone: (role, text, error, workerId) => {
+        const stop = workerWaiters.get(workerId);
+        if (stop) { stop(false); workerWaiters.delete(workerId); }
         if (error) {
           workerErrorCount++;
           console.log(`${ANSI.error}[Worker] ${role.label} FEHLER: ${error}${ANSI.reset}`);
@@ -954,6 +954,11 @@ async function runHiveCommand(task) {
         console.log(`\n${ANSI.error}[Coordinator-Neustart] Vorheriger Versuch hat keinen Worker gestartet -- Versuch ${attempt}...${ANSI.reset}`);
       },
     });
+    // Sicherheitsnetz: normalerweise raeumt onWorkerDone jeden Eintrag selbst ab, aber falls
+    // doch mal einer haengen bleibt (z.B. ein nie aufgeloester Promise-Zweig), hier hart stoppen
+    // statt einen tickenden Heartbeat nach Lauf-Ende weiterlaufen zu lassen.
+    for (const stop of workerWaiters.values()) stop(false);
+    workerWaiters.clear();
     if (!result.dispatchHappened) {
       console.log(
         `\n${ANSI.error}[Fehlschlag] Coordinator hat trotz ${coordinatorRetries + 1} Versuch(en) keinen einzigen Worker gestartet (haeufige Ursache: wiederholte Server-Ueberlastung des Coordinator-Modells "${coordinatorRole.model}"). Aufgabe erneut per /hive versuchen oder /model fuer die Coordinator-Rolle wechseln.${ANSI.reset}\n`
