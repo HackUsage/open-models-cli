@@ -65,93 +65,118 @@ function buildDispatchTool(workerRoles) {
 // Worker selbst bekommen KEIN dispatch_agents-Tool -- eine Verschachtelungsebene (Coordinator
 // -> Worker), kein rekursives Sub-Spawning. Das haelt Kosten/Komplexitaet planbar; bei Bedarf
 // liesse sich das spaeter erweitern (Worker duerften dann selbst re-dispatchen).
-async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {} }) {
+// ponytail: Bug, den ein echter Lauf aufgedeckt hat -- coordinatorToolCallHappened blieb
+// fuer die GESAMTE (mehrstufige) Coordinator-Unterhaltung auf true, sobald IRGENDEIN Tool-
+// Aufruf passiert war (z.B. ein exploratives list_directory ganz am Anfang). Als danach der
+// naechste Modell-Call mit 503 fehlschlug, kurz retryte und leer zurueckkam, wertete der Code
+// das als "erfolgreich abgeschlossen" -- der Coordinator hat aber nie dispatch_agents
+// aufgerufen, Hive meldete trotzdem "fertig" mit 0 Workern. Fix: nicht "irgendein Tool-Call
+// jemals", sondern konkret "wurde ueberhaupt dispatcht" pruefen (dispatchHappened) -- und bei
+// "nein" den Coordinator-Versuch automatisch (mit explizitem Hinweis) wiederholen, statt
+// stillschweigend mit 0 Workern abzuschliessen.
+const MAX_COORDINATOR_ATTEMPTS = 2;
+
+async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {}, onCoordinatorRetry = () => {} }) {
   const dispatchTool = buildDispatchTool(workerRoles);
   // Coordinator bekommt volle Datei-Tools (er delegiert primaer, kann aber selbst nachschauen).
   const fileTools = buildToolDefinitions(config.projectRoot);
 
-  onAgentStart(coordinatorRole);
+  let dispatchHappened = false;
+  let result = null;
 
-  const coordinatorConfig = { ...config, activeModel: coordinatorRole.model };
-  const coordinatorMessages = [
-    { role: 'system', content: coordinatorRole.systemPrompt },
-    { role: 'user', content: `Team-Aufgabe: ${task}` },
-  ];
+  for (let attempt = 1; attempt <= MAX_COORDINATOR_ATTEMPTS && !dispatchHappened; attempt++) {
+    onAgentStart(coordinatorRole);
 
-  let coordinatorToolCallHappened = false;
-  const result = await sendChat({
-    config: coordinatorConfig,
-    messages: coordinatorMessages,
-    tools: [dispatchTool, ...fileTools],
-    onChunk,
-    onRetry,
-    onToolCall: async (toolCall) => {
-      coordinatorToolCallHappened = true;
-      if (toolCall.function.name !== 'dispatch_agents') {
-        return onFileToolCall(toolCall);
-      }
-      let args;
-      try {
-        args = JSON.parse(toolCall.function.arguments || '{}');
-      } catch {
-        return 'FEHLER: dispatch_agents Argumente nicht parsebar.';
-      }
-      const assignments = Array.isArray(args.assignments) ? args.assignments.slice(0, MAX_ASSIGNMENTS_PER_DISPATCH) : [];
-      if (!assignments.length) {
-        return 'FEHLER: keine gueltigen assignments uebergeben.';
-      }
+    const coordinatorConfig = { ...config, activeModel: coordinatorRole.model };
+    const coordinatorMessages = [
+      { role: 'system', content: coordinatorRole.systemPrompt },
+      { role: 'user', content: `Team-Aufgabe: ${task}` },
+    ];
+    if (attempt > 1) {
+      onCoordinatorRetry(attempt);
+      coordinatorMessages.push({
+        role: 'user',
+        content: 'Hinweis: der vorherige Versuch hat KEINEN einzigen Worker per dispatch_agents gestartet (z.B. durch einen voruebergehenden Server-Fehler mittendrin beendet). Rufe jetzt tatsaechlich dispatch_agents auf und verteile die Aufgabe an Worker.',
+      });
+    }
 
-      const outcomes = await Promise.all(
-        assignments.map(async (a) => {
-          const role = workerRoles.find((r) => r.name === a.role);
-          if (!role) {
-            return { role: a.role, label: a.role, error: `Rolle "${a.role}" nicht gefunden.` };
-          }
-          onWorkerStart(role, a.task);
-          const workerConfig = { ...config, activeModel: role.model };
-          const workerTools = role.readOnly ? buildToolDefinitions(config.projectRoot, { readOnly: true }) : fileTools;
-          let text = '';
-          let toolCallHappened = false;
-          try {
-            await sendChat({
-              config: workerConfig,
-              messages: [
-                { role: 'system', content: role.systemPrompt },
-                { role: 'user', content: a.task },
-              ],
-              tools: workerTools,
-              onChunk: (delta) => { text += delta; },
-              onToolCall: (toolCall) => {
-                toolCallHappened = true;
-                return onFileToolCall(toolCall);
-              },
-              onRetry,
-            });
-            if (!text.trim() && !toolCallHappened) {
-              const warning = 'LEER: Modell hat weder Text noch Tool-Aufrufe geliefert (moeglicher Modell-Aussetzer).';
-              onWorkerDone(role, text, warning);
-              return { role: role.name, label: role.label, error: warning };
+    let coordinatorToolCallHappened = false;
+    result = await sendChat({
+      config: coordinatorConfig,
+      messages: coordinatorMessages,
+      tools: [dispatchTool, ...fileTools],
+      onChunk,
+      onRetry,
+      onToolCall: async (toolCall) => {
+        coordinatorToolCallHappened = true;
+        if (toolCall.function.name !== 'dispatch_agents') {
+          return onFileToolCall(toolCall);
+        }
+        let args;
+        try {
+          args = JSON.parse(toolCall.function.arguments || '{}');
+        } catch {
+          return 'FEHLER: dispatch_agents Argumente nicht parsebar.';
+        }
+        const assignments = Array.isArray(args.assignments) ? args.assignments.slice(0, MAX_ASSIGNMENTS_PER_DISPATCH) : [];
+        if (!assignments.length) {
+          return 'FEHLER: keine gueltigen assignments uebergeben.';
+        }
+        dispatchHappened = true;
+
+        const outcomes = await Promise.all(
+          assignments.map(async (a) => {
+            const role = workerRoles.find((r) => r.name === a.role);
+            if (!role) {
+              return { role: a.role, label: a.role, error: `Rolle "${a.role}" nicht gefunden.` };
             }
-            onWorkerDone(role, text, null);
-            return { role: role.name, label: role.label, text };
-          } catch (err) {
-            const message = err.message || String(err);
-            onWorkerDone(role, '', message);
-            return { role: role.name, label: role.label, error: message };
-          }
-        })
-      );
+            onWorkerStart(role, a.task);
+            const workerConfig = { ...config, activeModel: role.model };
+            const workerTools = role.readOnly ? buildToolDefinitions(config.projectRoot, { readOnly: true }) : fileTools;
+            let text = '';
+            let toolCallHappened = false;
+            try {
+              await sendChat({
+                config: workerConfig,
+                messages: [
+                  { role: 'system', content: role.systemPrompt },
+                  { role: 'user', content: a.task },
+                ],
+                tools: workerTools,
+                onChunk: (delta) => { text += delta; },
+                onToolCall: (toolCall) => {
+                  toolCallHappened = true;
+                  return onFileToolCall(toolCall);
+                },
+                onRetry,
+              });
+              if (!text.trim() && !toolCallHappened) {
+                const warning = 'LEER: Modell hat weder Text noch Tool-Aufrufe geliefert (moeglicher Modell-Aussetzer).';
+                onWorkerDone(role, text, warning);
+                return { role: role.name, label: role.label, error: warning };
+              }
+              onWorkerDone(role, text, null);
+              return { role: role.name, label: role.label, text };
+            } catch (err) {
+              const message = err.message || String(err);
+              onWorkerDone(role, '', message);
+              return { role: role.name, label: role.label, error: message };
+            }
+          })
+        );
 
-      return outcomes
-        .map((o) => (o.error ? `[${o.label}] FEHLER: ${o.error}` : `[${o.label}] ${o.text}`))
-        .join('\n\n');
-    },
-  });
+        return outcomes
+          .map((o) => (o.error ? `[${o.label}] FEHLER: ${o.error}` : `[${o.label}] ${o.text}`))
+          .join('\n\n');
+      },
+    });
 
-  if (!result.finalText.trim() && !coordinatorToolCallHappened) {
-    onEmptyTurn(coordinatorRole);
+    if (!result.finalText.trim() && !coordinatorToolCallHappened) {
+      onEmptyTurn(coordinatorRole);
+    }
   }
 
+  result.dispatchHappened = dispatchHappened;
   return result;
 }
 

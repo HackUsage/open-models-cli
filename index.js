@@ -911,8 +911,9 @@ async function runHiveCommand(task) {
   // Zeile wuerde bei mehreren gleichzeitigen Workern nur wirres Ueberschreiben produzieren.
   // Deshalb hier overwrite:false (eigene Log-Zeile alle 15s, sicher unter Nebenlaeufigkeit).
   const workerWaiters = new Map();
+  let coordinatorRetries = 0;
   try {
-    await runHive({
+    const result = await runHive({
       config,
       task,
       coordinatorRole,
@@ -948,10 +949,20 @@ async function runHiveCommand(task) {
       },
       onRetry: (...args) => { retryCount++; stopWaiting(true); printRetry(...args); firstOutput = true; },
       onEmptyTurn: (role) => { emptyTurnCount++; stopWaiting(true); printEmptyTurn(role); },
+      onCoordinatorRetry: (attempt) => {
+        coordinatorRetries++;
+        console.log(`\n${ANSI.error}[Coordinator-Neustart] Vorheriger Versuch hat keinen Worker gestartet -- Versuch ${attempt}...${ANSI.reset}`);
+      },
     });
-    console.log(
-      `\n${ANSI.dim}Hive fertig. (${workerCount} Worker gestartet, ${workerErrorCount} Fehler, ${retryCount} Retries, ${emptyTurnCount} leere Zuege)${ANSI.reset}\n`
-    );
+    if (!result.dispatchHappened) {
+      console.log(
+        `\n${ANSI.error}[Fehlschlag] Coordinator hat trotz ${coordinatorRetries + 1} Versuch(en) keinen einzigen Worker gestartet (haeufige Ursache: wiederholte Server-Ueberlastung des Coordinator-Modells "${coordinatorRole.model}"). Aufgabe erneut per /hive versuchen oder /model fuer die Coordinator-Rolle wechseln.${ANSI.reset}\n`
+      );
+    } else {
+      console.log(
+        `\n${ANSI.dim}Hive fertig. (${workerCount} Worker gestartet, ${workerErrorCount} Fehler, ${retryCount} Retries, ${emptyTurnCount} leere Zuege${coordinatorRetries ? `, ${coordinatorRetries} Coordinator-Neustarts` : ''})${ANSI.reset}\n`
+      );
+    }
   } catch (err) {
     stopWaiting(true);
     for (const stop of workerWaiters.values()) stop(false);
