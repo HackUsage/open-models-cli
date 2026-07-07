@@ -50,6 +50,12 @@ function ensureCwd(root) {
 function tryHandleCd(root, command) {
   const trimmed = command.trim();
   if (!/^cd(\s|$)/i.test(trimmed)) return null;
+  // Nur REINE "cd <pfad>"-Befehle abfangen. Ein zusammengesetzter Befehl wie
+  // "cd dir && node script.js" soll ganz normal per echtem Shell-exec laufen (der cd-Teil
+  // gilt dann nur fuer DIESEN einen Aufruf) -- sonst wuerde hier faelschlich nur ein cd
+  // simuliert (der GESAMTE Rest inkl. "&& node ...") wird als Pfad interpretiert), der Rest
+  // des Befehls (das eigentliche Kommando) wird NIE ausgefuehrt, obwohl "OK" gemeldet wird.
+  if (/&&|\|\||[;|\n]/.test(trimmed)) return null;
   const target = trimmed.replace(/^cd\s*/i, '').trim().replace(/^["']|["']$/g, '');
   const rootResolved = path.resolve(root);
   const cwd = ensureCwd(root);

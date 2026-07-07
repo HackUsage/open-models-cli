@@ -17,6 +17,20 @@ const { scanForInjection, appendAuditLog } = require('./permissions');
 
 const AUDIT_LOG_PATH = path.join(path.dirname(CONFIG_PATH), 'audit.log');
 
+// Crash-Schutz: ohne das killt Node den GESAMTEN CLI-Prozess bei jedem unabgefangenen Fehler
+// (z.B. ein voruebergehender ENOTCONN beim Spawnen eines Kindprozesses in shell.js -- ein
+// bekannter, seltener Windows/Node-Bug, kein Fehler in unserem Code). Bei einem mehrstuendigen
+// Hive-Lauf darf ein einzelner solcher Ausreisser nicht die ganze Sitzung beenden. Node warnt
+// zurecht, dass der Prozesszustand nach uncaughtException technisch undefiniert sein kann --
+// hier bewusst in Kauf genommen, weil die Alternative (kompletter Absturz mitten in einem
+// Multi-Agent-Lauf) fuer dieses Tool schlimmer ist.
+process.on('uncaughtException', (err) => {
+  console.log(`\n${ANSI.error}[Unerwarteter Fehler] ${err && err.message ? err.message : err} -- CLI laeuft weiter.${ANSI.reset}`);
+});
+process.on('unhandledRejection', (err) => {
+  console.log(`\n${ANSI.error}[Unerwarteter Fehler] ${err && err.message ? err.message : err} -- CLI laeuft weiter.${ANSI.reset}`);
+});
+
 const mcpClients = new Map();
 
 // Kombiniert Datei-Tools + Shell-Tool zu einer Liste, wie sie an sendChat/runSwarm/runHive
