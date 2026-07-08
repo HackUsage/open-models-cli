@@ -29,8 +29,8 @@ zusaetzlich in `session.json` im selben Ordner gespeichert und beim naechsten St
 geladen (`/new` loescht ihn wieder explizit).
 
 Projekt-Ordner fuer die Datei-Tools (`read_file`/`write_file`/`run_command`/...) ist standardmaessig
-in `providers.js` (`DEFAULT_CONFIG.projectRoot`) hinterlegt -- fuer eigene Projekte anpassen oder zur
-Laufzeit in `~/.claude-nemotron-cli/config.json` unter `"projectRoot"` aendern.
+`~/nemotron-projects` (wird automatisch angelegt, falls noch nicht vorhanden) -- mit
+`/projectroot <pfad>` jederzeit auf einen anderen Ordner wechseln.
 
 ### Optional: eigenes Windows-Terminal-Profil
 

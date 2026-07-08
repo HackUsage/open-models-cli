@@ -40,7 +40,11 @@ const DEFAULT_CONFIG = {
   customBaseUrl: '',
   activeModel: 'nemotron-super',
   activeProvider: 'openrouter',
-  projectRoot: 'E:\\',
+  // Portabler Default statt eines hart codierten Laufwerks (war 'E:\\' -- funktionierte nur
+  // auf dem Rechner, auf dem das gebaut wurde; ein anderer Nutzer haette dieses Laufwerk
+  // wahrscheinlich gar nicht). Wird bei Bedarf automatisch angelegt (siehe index.js), per
+  // /projectroot <pfad> jederzeit aenderbar.
+  projectRoot: path.join(os.homedir(), 'nemotron-projects'),
   style: 'off',
   effort: 'high',
   fallbackModel: '',

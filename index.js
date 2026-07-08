@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { PROVIDERS, MODEL_PRESETS, loadConfig, saveConfig, sendChat, resolveTarget, CONFIG_PATH } = require('./providers');
 const { buildToolDefinitions: buildFileTools, WRITE_TOOLS, executeTool, undoLastWrite } = require('./tools');
-const { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS } = require('./shell');
+const { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS, resetCwd } = require('./shell');
 const { AGENTS_DIR, loadAgentRoles, loadPipelineOrder } = require('./agents');
 const { runSwarm, runHive, runConsensusCheck } = require('./swarm');
 const { STYLES, styleSystemMessage } = require('./styles');
@@ -234,6 +234,7 @@ const COMMAND_HELP = {
   provider: { short: 'Anbieter fuer nicht-Preset-Modelle waehlen', long: 'Wirkt nur, wenn /model eine eigene Modell-ID (kein Preset) gesetzt hat. Fuer Custom-Endpunkte reicht meist direkt /baseurl (setzt Provider automatisch mit).' },
   setkey: { short: 'API-Key fuer einen Anbieter speichern', long: '/setkey <openrouter|nim|ollama> <key>. Ollama braucht i.d.R. keinen echten Key.' },
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
+  projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
   agent: { short: 'Genau EINE Rolle ad-hoc auf eine Aufgabe ansetzen', long: 'Anders als /swarm: keine feste Pipeline-Reihenfolge, nur die eine angegebene Rolle fuer genau einen Zug. Sinnvoll fuer kleine Einzelaufgaben, wo Planner->Coder->Reviewer ueberdimensioniert waere.' },
   team: { short: 'Fragt nach: /swarm oder /hive fuer diese Aufgabe?', long: 'Reine Rueckfrage-Huelle, kein eigener Modus -- startet je nach Antwort entweder /swarm oder /hive. /team loop [n] <aufgabe> fragt einmal, wiederholt die gewaehlte Variante dann bis zu n-mal.' },
@@ -259,7 +260,7 @@ const COMMAND_HELP = {
 };
 
 const BUILTIN_COMMANDS = [
-  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'baseurl',
+  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'baseurl', 'projectroot',
   'agents', 'agent', 'team', 'swarm', 'hive', 'panel', 'style', 'effort',
   'permission', 'plan', 'autoapprove', 'swarmautonomy', 'todo', 'history', 'codemap', 'undo',
   'usage', 'mcp', 'help', 'settings', 'new', 'exit',
@@ -300,10 +301,26 @@ function activeLabel() {
   return `${config.activeModel} (${target.providerLabel})`;
 }
 
+// Der Projekt-Ordner ist portabel (kein hart codiertes Laufwerk mehr), existiert bei einem
+// frischen Start aber moeglicherweise noch nicht -- automatisch anlegen statt erst beim
+// ersten Tool-Aufruf mit ENOENT zu scheitern. Schlaegt das Anlegen fehl (z.B. ungueltiger
+// Pfad nach manueller config.json-Bearbeitung), klar warnen statt still weiterzumachen.
+function ensureProjectRoot(root) {
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function printBanner() {
   console.log(`${ANSI.accent}${ANSI.bold}Open-Source Terminal Chat${ANSI.reset}`);
   console.log(`${ANSI.dim}Modell: ${activeLabel()}${ANSI.reset}`);
   console.log(`${ANSI.dim}Projekt-Ordner (Datei-Tools): ${config.projectRoot}${ANSI.reset}`);
+  if (!ensureProjectRoot(config.projectRoot)) {
+    console.log(`${ANSI.error}Projekt-Ordner existiert nicht und konnte nicht angelegt werden -- /projectroot <anderer-pfad> zum Aendern.${ANSI.reset}`);
+  }
   const detected = detectProjectType(config.projectRoot);
   if (detected.length) {
     console.log(`${ANSI.dim}Erkannt: ${detected.join(', ')}${ANSI.reset}`);
@@ -588,6 +605,24 @@ async function handleCommand(line) {
     config.keys[providerArg] = key;
     saveConfig(config);
     console.log(`${ANSI.dim}Key fuer ${PROVIDERS[providerArg].label} gespeichert (${CONFIG_PATH}).${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'projectroot') {
+    if (!arg) {
+      console.log(`${ANSI.error}Nutzung: /projectroot <pfad>  (aktuell: ${config.projectRoot})${ANSI.reset}\n`);
+      return;
+    }
+    const resolved = path.resolve(arg);
+    try {
+      fs.mkdirSync(resolved, { recursive: true });
+    } catch (err) {
+      console.log(`${ANSI.error}Ordner konnte nicht angelegt/gefunden werden: ${err.message}${ANSI.reset}\n`);
+      return;
+    }
+    config.projectRoot = resolved;
+    saveConfig(config);
+    resetCwd();
+    console.log(`${ANSI.dim}Projekt-Ordner gesetzt: ${resolved}${ANSI.reset}\n`);
     return;
   }
   if (cmd === 'baseurl') {

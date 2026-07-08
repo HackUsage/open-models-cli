@@ -158,4 +158,11 @@ function buildShellToolDefinitions(root) {
 
 const SHELL_WRITE_TOOLS = new Set(['run_command']);
 
-module.exports = { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS };
+// Wird von /projectroot aufgerufen, wenn der Projekt-Ordner zur Laufzeit gewechselt wird --
+// sonst bliebe currentCwd (einmal lazy gesetzt beim ersten run_command) auf dem ALTEN Root
+// haengen, obwohl der Nutzer gerade explizit einen neuen Ordner gewaehlt hat.
+function resetCwd() {
+  currentCwd = null;
+}
+
+module.exports = { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS, resetCwd };
