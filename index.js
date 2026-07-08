@@ -14,6 +14,7 @@ const { EFFORT_LEVELS, effortMaxTokens, effortSystemMessage } = require('./effor
 const { MCPClient, mcpToolDefinitions, isMcpTool, parseMcpTool } = require('./mcp');
 const { loadCustomCommand, listCustomCommands, renderCommand } = require('./commands');
 const { scanForInjection, appendAuditLog } = require('./permissions');
+const { fableSystemMessage } = require('./fable');
 
 const AUDIT_LOG_PATH = path.join(path.dirname(CONFIG_PATH), 'audit.log');
 
@@ -1031,7 +1032,7 @@ async function attemptChat(activeConfig) {
   const effortMsg = effortSystemMessage(activeConfig.effort);
   const projectInstructions = loadProjectInstructions(activeConfig.projectRoot);
   const projectMsg = projectInstructions ? { role: 'system', content: projectInstructions } : null;
-  const extraMessages = [styleMsg, effortMsg, projectMsg].filter(Boolean);
+  const extraMessages = [fableSystemMessage(), styleMsg, effortMsg, projectMsg].filter(Boolean);
   let assistantText = '';
   let firstOutput = true;
   let stopWaiting = makeWaitIndicator(`${ANSI.dim}(wartet auf Modell-Antwort)${ANSI.reset}`);

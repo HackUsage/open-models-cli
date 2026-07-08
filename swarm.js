@@ -2,6 +2,7 @@
 
 const { sendChat } = require('./providers');
 const { styleSystemMessage } = require('./styles');
+const { fableSystemMessage } = require('./fable');
 
 const SEND_MESSAGE_TOOL = {
   type: 'function',
@@ -98,6 +99,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
     const coordinatorConfig = { ...config, activeModel: coordinatorRole.model };
     const coordinatorMessages = [
       { role: 'system', content: coordinatorRole.systemPrompt },
+      fableSystemMessage(),
       { role: 'user', content: `Team-Aufgabe: ${task}` },
     ];
     if (attempt > 1) {
@@ -149,6 +151,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
                 config: workerConfig,
                 messages: [
                   { role: 'system', content: role.systemPrompt },
+                  fableSystemMessage(),
                   { role: 'user', content: a.task },
                 ],
                 tools: workerTools,
@@ -221,6 +224,7 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
     const styleMsg = styleSystemMessage(config.style);
     const roleMessages = [
       { role: 'system', content: role.systemPrompt },
+      fableSystemMessage(),
       ...(styleMsg ? [styleMsg] : []),
       ...transcript,
       ...pending.map((m) => ({ role: 'user', content: speakerTag(`Nachricht von ${m.from}`, m.content) })),
