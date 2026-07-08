@@ -236,9 +236,9 @@ const COMMAND_HELP = {
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
   agent: { short: 'Genau EINE Rolle ad-hoc auf eine Aufgabe ansetzen', long: 'Anders als /swarm: keine feste Pipeline-Reihenfolge, nur die eine angegebene Rolle fuer genau einen Zug. Sinnvoll fuer kleine Einzelaufgaben, wo Planner->Coder->Reviewer ueberdimensioniert waere.' },
-  team: { short: 'Fragt nach: /swarm oder /hive fuer diese Aufgabe?', long: 'Reine Rueckfrage-Huelle, kein eigener Modus -- startet je nach Antwort entweder /swarm oder /hive.' },
-  swarm: { short: 'Feste Pipeline (Planner -> Coder -> Reviewer, Ruecksprache moeglich)', long: 'Reihenfolge aus agents/pipeline.json. Rollen koennen sich per send_message gegenseitig erneut anstossen (Ruecksprache). Laeuft autonom, siehe /swarmautonomy.' },
-  hive: { short: 'Coordinator verteilt Teilaufgaben an >=5 Worker PARALLEL', long: 'Ein Coordinator-Modell zerlegt die Aufgabe und dispatcht per Tool-Call gleichzeitig an mehrere Worker-Rollen (echte parallele HTTP-Requests). Besser fuer groessere, gut parallelisierbare Aufgaben als /swarm.' },
+  team: { short: 'Fragt nach: /swarm oder /hive fuer diese Aufgabe?', long: 'Reine Rueckfrage-Huelle, kein eigener Modus -- startet je nach Antwort entweder /swarm oder /hive. /team loop [n] <aufgabe> fragt einmal, wiederholt die gewaehlte Variante dann bis zu n-mal.' },
+  swarm: { short: 'Feste Pipeline (Planner -> Coder -> Reviewer, Ruecksprache moeglich)', long: 'Reihenfolge aus agents/pipeline.json. Rollen koennen sich per send_message gegenseitig erneut anstossen (Ruecksprache). Laeuft autonom, siehe /swarmautonomy. /swarm loop [n] <aufgabe> wiederholt bis zu n-mal (Default 3), baut dabei auf der Projekt-Gedaechtnis-Datei auf und bricht frueher ab, falls eine Rolle mark_task_complete aufruft.' },
+  hive: { short: 'Coordinator verteilt Teilaufgaben an >=5 Worker PARALLEL', long: 'Ein Coordinator-Modell zerlegt die Aufgabe und dispatcht per Tool-Call gleichzeitig an mehrere Worker-Rollen (echte parallele HTTP-Requests, bis zu 2 Verschachtelungsebenen). Nach Abschluss pruefen 3 unabhaengige Modelle per Konsens, ob wirklich fertig ist. /hive loop [n] <aufgabe> wiederholt bis zu n-mal (Default 3).' },
   panel: { short: 'Judge-Panel: 3 Modelle parallel, 1 Richter waehlt/synthetisiert', long: 'Keine Datei-Tools -- reiner Text-Vergleich fuer Fragen, wo mehrere unabhaengige Meinungen sinnvoll sind (z.B. Architektur-Entscheidungen).' },
   style: { short: 'Antwortstil setzen (caveman/ponytail/off)', long: 'Wirkt als zusaetzliche System-Nachricht bei Einzel-Chat und Swarm/Hive-Rollen.' },
   effort: { short: 'Gruendlichkeit/Antwortlaenge steuern', long: 'low|medium|high|xhigh -- kein echtes Thinking-Budget (OpenAI-kompatible Endpunkte haben das nicht), nur Antwortlaenge + Gruendlichkeits-Hinweis.' },
@@ -704,22 +704,55 @@ async function handleCommand(line) {
     return;
   }
   if (cmd === 'swarm') {
+    const loopArgs = parseLoopArgs(arg);
+    if (loopArgs) {
+      if (!loopArgs.task) {
+        console.log(`${ANSI.error}Nutzung: /swarm loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        return;
+      }
+      await runLoopCommand('swarm', loopArgs.n, loopArgs.task);
+      return;
+    }
     if (!arg) {
-      console.log(`${ANSI.error}Nutzung: /swarm <Aufgabe>${ANSI.reset}\n`);
+      console.log(`${ANSI.error}Nutzung: /swarm <Aufgabe>  (oder /swarm loop [n] <aufgabe>)${ANSI.reset}\n`);
       return;
     }
     await runSwarmCommand(arg);
     return;
   }
   if (cmd === 'hive') {
+    const loopArgs = parseLoopArgs(arg);
+    if (loopArgs) {
+      if (!loopArgs.task) {
+        console.log(`${ANSI.error}Nutzung: /hive loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        return;
+      }
+      await runLoopCommand('hive', loopArgs.n, loopArgs.task);
+      return;
+    }
     if (!arg) {
-      console.log(`${ANSI.error}Nutzung: /hive <aufgabe>${ANSI.reset}\n`);
+      console.log(`${ANSI.error}Nutzung: /hive <aufgabe>  (oder /hive loop [n] <aufgabe>)${ANSI.reset}\n`);
       return;
     }
     await runHiveCommand(arg);
     return;
   }
   if (cmd === 'team') {
+    const loopArgs = parseLoopArgs(arg);
+    if (loopArgs) {
+      if (!loopArgs.task) {
+        console.log(`${ANSI.error}Nutzung: /team loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        return;
+      }
+      const loopAnswer = (await askQuestion(`${ANSI.bold}Swarm (feste Pipeline) oder Hive (Coordinator, parallel, >=5 Worker)? [swarm/hive] ${ANSI.reset}`)).toLowerCase();
+      const loopKind = loopAnswer === 'hive' || loopAnswer === 'h' ? 'hive' : loopAnswer === 'swarm' || loopAnswer === 's' ? 'swarm' : null;
+      if (!loopKind) {
+        console.log(`${ANSI.error}Unbekannte Auswahl "${loopAnswer}" -- abgebrochen, bitte "swarm" oder "hive" eingeben.${ANSI.reset}\n`);
+        return;
+      }
+      await runLoopCommand(loopKind, loopArgs.n, loopArgs.task);
+      return;
+    }
     if (!arg) {
       console.log(`${ANSI.error}Nutzung: /team <Aufgabe> -- fragt danach, ob /swarm oder /hive laufen soll.${ANSI.reset}\n`);
       return;
@@ -877,7 +910,86 @@ async function handleCommand(line) {
 
 // Aus handleCommand('/swarm ...') UND '/team ...' aufrufbar (gleiche Logik, nur der
 // Einstiegspunkt unterscheidet sich).
-async function runSwarmCommand(task) {
+// Nur im Loop-Modus verfuegbar (siehe runLoopCommand) -- eine Rolle kann damit die GESAMTE
+// mehrstufige Aufgabe als fertig markieren und den Loop vor dem naechsten geplanten
+// Durchlauf beenden. Bewusst getrennt von "dieser einzelne Durchlauf ist fertig" (das meldet
+// jeder normale Zug ohnehin durch schlichtes Nicht-mehr-Tool-Aufrufen).
+const MARK_COMPLETE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'mark_task_complete',
+    description:
+      'Nur im Loop-Modus: markiert die GESAMTE Mehrfach-Durchlauf-Aufgabe als abgeschlossen und beendet den Loop. ' +
+      'Nur aufrufen, wenn wirklich alles fertig ist -- nicht nur dieser einzelne Durchlauf.',
+    parameters: {
+      type: 'object',
+      properties: { reason: { type: 'string', description: 'Kurze Begruendung, warum die Gesamtaufgabe fertig ist' } },
+      required: ['reason'],
+    },
+  },
+};
+
+// "/swarm loop [n] <aufgabe>" / "/hive loop [n] <aufgabe>" / "/team loop [n] <aufgabe>" --
+// n ist optional (Default 3). Kein echter Hintergrundprozess (bleibt synchron/REPL-gebunden
+// wie der Rest des Tools) -- laeuft einfach bis zu n-mal hintereinander im aktuellen Prozess,
+// nutzt dabei automatisch die Projekt-Gedaechtnis-Datei (Phase B) als wachsenden Kontext, so
+// dass Durchlauf 2 auf Durchlauf 1 aufbaut statt neu anzufangen. /exit oder Strg+C beendet wie
+// gewohnt den ganzen Prozess (kein separater Stop-Befehl fuer nur den Loop noetig).
+function parseLoopArgs(arg) {
+  const parts = arg.split(' ');
+  if (parts[0] !== 'loop') return null;
+  const rest = parts.slice(1);
+  const maybeN = Number(rest[0]);
+  const hasN = Number.isInteger(maybeN) && maybeN > 0;
+  const n = hasN ? maybeN : 3;
+  const task = (hasN ? rest.slice(1) : rest).join(' ').trim();
+  return { n, task };
+}
+
+async function runLoopCommand(kind, n, task) {
+  console.log(
+    `${ANSI.dim}${kind === 'hive' ? 'Hive' : 'Swarm'}-Loop startet: bis zu ${n} Durchlaeufe (bricht frueher ab, falls eine Rolle mark_task_complete aufruft).${ANSI.reset}\n`
+  );
+  for (let i = 1; i <= n; i++) {
+    console.log(`\n${ANSI.accent}${ANSI.bold}=== Loop-Durchlauf ${i}/${n} ===${ANSI.reset}`);
+    let stopped = false;
+    let stopReason = '';
+    const loopBuildTools = (root, toolOpts) => [...buildToolDefinitions(root, toolOpts), MARK_COMPLETE_TOOL];
+    const loopFileToolCall = (toolCall) => {
+      if (toolCall.function.name === 'mark_task_complete') {
+        let args = {};
+        try {
+          args = JSON.parse(toolCall.function.arguments || '{}');
+        } catch {
+          /* leeres Objekt reicht als Fallback */
+        }
+        stopped = true;
+        stopReason = args.reason || '(kein Grund angegeben)';
+        return `OK: Gesamtaufgabe als abgeschlossen markiert (${stopReason}).`;
+      }
+      return handleToolCall(toolCall, { swarmMode: true });
+    };
+
+    if (kind === 'hive') {
+      await runHiveCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
+    } else {
+      await runSwarmCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
+    }
+
+    if (stopped) {
+      console.log(`\n${ANSI.dim}Loop vorzeitig beendet nach Durchlauf ${i}/${n}: ${stopReason}${ANSI.reset}\n`);
+      return;
+    }
+  }
+  console.log(`${ANSI.dim}Loop-Limit (${n}) erreicht -- Loop beendet.${ANSI.reset}\n`);
+}
+
+// opts.buildToolDefinitions/opts.onFileToolCall: Ueberschreibbar fuer den Loop-Modus (fuegt
+// dort das mark_task_complete-Tool hinzu) -- normale Einzel-Laeufe nutzen unveraendert die
+// Standardwerte, kein Verhaltensunterschied ausserhalb von /swarm loop.
+async function runSwarmCommand(task, opts = {}) {
+  const buildTools = opts.buildToolDefinitions || buildToolDefinitions;
+  const fileToolCall = opts.onFileToolCall || ((toolCall) => handleToolCall(toolCall, { swarmMode: true }));
   const roles = loadAgentRoles();
   if (!roles.length) {
     console.log(`${ANSI.error}Keine Agent-Rollen in ${AGENTS_DIR} gefunden (JSON-Dateien anlegen, siehe README).${ANSI.reset}\n`);
@@ -901,7 +1013,7 @@ async function runSwarmCommand(task) {
       config,
       task,
       roles: orderedRoles,
-      buildToolDefinitions,
+      buildToolDefinitions: buildTools,
       projectContext: buildAgentContext(config.projectRoot),
       onAgentStart: (role) => {
         turnCount++;
@@ -916,7 +1028,7 @@ async function runSwarmCommand(task) {
       onNotice: (text) => console.log(`\n${ANSI.accent}[Nachricht] ${text}${ANSI.reset}`),
       onFileToolCall: (toolCall) => {
         if (firstOutput) { stopWaiting(true); firstOutput = false; }
-        return handleToolCall(toolCall, { swarmMode: true });
+        return fileToolCall(toolCall);
       },
       onRetry: (...args) => { retryCount++; stopWaiting(true); printRetry(...args); firstOutput = true; },
       onEmptyTurn: (role) => { emptyTurnCount++; stopWaiting(true); printEmptyTurn(role); },
@@ -936,7 +1048,9 @@ async function runSwarmCommand(task) {
 }
 
 // Aus handleCommand('/hive ...') UND '/team ...' aufrufbar.
-async function runHiveCommand(task) {
+async function runHiveCommand(task, opts = {}) {
+  const buildTools = opts.buildToolDefinitions || buildToolDefinitions;
+  const fileToolCall = opts.onFileToolCall || ((toolCall) => handleToolCall(toolCall, { swarmMode: true }));
   const roles = loadAgentRoles();
   const coordinatorRole = roles.find((r) => r.name === 'coordinator');
   const workerRoles = roles.filter((r) => r.name !== 'coordinator');
@@ -969,7 +1083,7 @@ async function runHiveCommand(task) {
       task,
       coordinatorRole,
       workerRoles,
-      buildToolDefinitions,
+      buildToolDefinitions: buildTools,
       projectContext: buildAgentContext(config.projectRoot),
       onAgentStart: (r) => {
         console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) ===${ANSI.reset}`);
@@ -997,7 +1111,7 @@ async function runHiveCommand(task) {
       },
       onFileToolCall: (toolCall) => {
         if (firstOutput) { stopWaiting(true); firstOutput = false; }
-        return handleToolCall(toolCall, { swarmMode: true });
+        return fileToolCall(toolCall);
       },
       onRetry: (...args) => { retryCount++; stopWaiting(true); printRetry(...args); firstOutput = true; },
       onEmptyTurn: (role) => { emptyTurnCount++; stopWaiting(true); printEmptyTurn(role); },
@@ -1027,8 +1141,8 @@ async function runHiveCommand(task) {
         config,
         task,
         files: newFiles,
-        buildToolDefinitions,
-        onFileToolCall: (tc) => handleToolCall(tc, { swarmMode: true }),
+        buildToolDefinitions: buildTools,
+        onFileToolCall: fileToolCall,
         onRetry: printRetry,
       });
       for (const v of consensus.votes) {
@@ -1046,7 +1160,7 @@ async function runHiveCommand(task) {
             task: followupTask,
             coordinatorRole,
             workerRoles,
-            buildToolDefinitions,
+            buildToolDefinitions: buildTools,
             projectContext: buildAgentContext(config.projectRoot),
             onAgentStart: (r) => console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) [Nachbesserung] ===${ANSI.reset}`),
             onChunk: (delta) => process.stdout.write(delta),
@@ -1057,7 +1171,7 @@ async function runHiveCommand(task) {
                   ? `${ANSI.error}[Worker] ${role.label} FEHLER: ${error}${ANSI.reset}`
                   : `${ANSI.dim}[Worker] ${role.label} fertig.${ANSI.reset}`
               ),
-            onFileToolCall: (tc) => handleToolCall(tc, { swarmMode: true }),
+            onFileToolCall: fileToolCall,
             onRetry: printRetry,
             onEmptyTurn: printEmptyTurn,
           });
