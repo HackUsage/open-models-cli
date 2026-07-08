@@ -101,6 +101,39 @@ System-Kontext injiziert (CLAUDE.md-Aequivalent, nur Einzel-Chat). `/todo add|do
 sie zu loeschen, `/history search <begriff>` durchsucht das Archiv. Uebersprungen: volles
 typisiertes Memory-System, gleichzeitige benannte Sessions (Architektur-Mismatch), Wissensgraph.
 
+## Fable-Layer, Gedaechtnis, Nested-Hives, Konsens, Loops (Phasen A-E, 2. Runde)
+
+Auf Nutzerwunsch nach echtem Praxiseinsatz (Kontext-Verlust zwischen Modellwechseln, kein
+wiederkehrender Modus, mehr Ruflo-Anleihen):
+
+**Phase A (Fable-Qualitaet):** `fable.js` -- Ton-/Formatierungs-/Fehlerumgangs-Richtlinien aus
+dem lokalen `fable`-Skill uebernommen, aber NUR der qualitaetsrelevante Teil, NICHT die
+Claude-Fable-5-Identitaet (waere bei DeepSeek/Kimi/GLM/Nemotron schlicht falsch). Gilt
+IMMER, fuer jedes Modell und jede Rolle, kein Toggle wie `/style`.
+
+**Phase B (Projekt-Gedaechtnis):** `memory.js` -- `AGENTS_MEMORY.md` wird nach jedem
+erfolgreichen `/agent`/`/swarm`/`/hive` automatisch geschrieben (Aufgabe, veraenderte Dateien,
+Kurzfassung) und von JEDER folgenden Konversation (auch nach `/model`-Wechsel) automatisch
+mitgelesen. Loest: eine andere KI im selben Fenster wusste vorher nichts vom letzten Lauf.
+
+**Phase C (2-stufige Nested-Hives):** ein von `/hive` dispatchter Worker bekommt selbst das
+`dispatch_agents`-Tool und kann seine Teilaufgabe weiter zerlegen (Ruflo-Vorbild, hier bewusst
+auf Tiefe 2 begrenzt statt Ruflos Tiefe 5).
+
+**Phase D (Hive-Mind-Konsens):** nach einem Hive-Lauf bewerten 3 unabhaengige, read-only
+Modell-Aufrufe die veraenderten Dateien (FERTIG/NACHBESSERUNG), Mehrheit entscheidet; bei
+Ablehnung EIN zusaetzlicher Coordinator-Durchlauf mit dem Feedback, danach Abschluss.
+
+**Phase E (Loop-Modus):** `/swarm loop [n] <aufgabe>`, `/hive loop [n] <aufgabe>`, `/team loop
+[n] <aufgabe>` (Default 3 Durchlaeufe) -- nutzt die Projekt-Gedaechtnis-Datei, um auf dem
+vorherigen Durchlauf aufzubauen, bricht frueher ab bei `mark_task_complete`.
+
+Bewusst NICHT uebernommen aus Ruflo (zu grosser Umbau fuer diese Runde, evtl. spaeter):
+AgentDB/Vektor-Suche (HNSW/RaBitQ), Knowledge-Graph, SPARC-Methodik, Cost-Tracker mit
+Detailaufschluesselung pro Rolle. Der harte Gefahren-Block fuer destruktive Shell-Befehle
+bleibt unveraendert bestehen -- Content-Sicherheitsbewusstsein (Fable) ersetzt nicht den
+technischen Schutz vor `rm -rf`/`format`/`git push --force`.
+
 ## Claude Code CLI vs. Terminal-Profil -- Nutzerkomfort (Stand nach Phase 1-8)
 
 Zweite Vergleichsrunde, diesmal NICHT nach rohen Faehigkeiten sortiert, sondern nach dem, was
