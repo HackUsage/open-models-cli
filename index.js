@@ -15,6 +15,7 @@ const { MCPClient, mcpToolDefinitions, isMcpTool, parseMcpTool } = require('./mc
 const { loadCustomCommand, listCustomCommands, renderCommand } = require('./commands');
 const { scanForInjection, appendAuditLog } = require('./permissions');
 const { fableSystemMessage } = require('./fable');
+const { PROJECT_MEMORY_FILENAME, loadProjectMemory, appendProjectMemory } = require('./memory');
 
 const AUDIT_LOG_PATH = path.join(path.dirname(CONFIG_PATH), 'audit.log');
 
@@ -171,6 +172,19 @@ function loadProjectInstructions(root) {
   }
 }
 
+// Kombiniert NEMOTRON.md (nutzer-verfasst) + AGENTS_MEMORY.md (vom Tool selbst nach jedem
+// erfolgreichen Lauf geschrieben) zu EINER System-Nachricht -- fuer Einzel-Chat UND fuer
+// Swarm/Hive/Agent-Rollen (die bekommen sie als projectContext durchgereicht). Loest das
+// Problem, dass ein Modellwechsel nach einem Hive-Lauf vorher nichts vom Projekt wusste.
+function buildAgentContext(root) {
+  const instructions = loadProjectInstructions(root);
+  const memory = loadProjectMemory(root);
+  const parts = [];
+  if (instructions) parts.push(`Projekt-Instruktionen (${PROJECT_INSTRUCTIONS_FILENAME}):\n${instructions}`);
+  if (memory) parts.push(`Bisherige Agent-Aktivitaet in diesem Projekt (${PROJECT_MEMORY_FILENAME}):\n${memory}`);
+  return parts.length ? parts.join('\n\n---\n\n') : null;
+}
+
 // Einfache JSON-Datei-backed Aufgabenliste (kein DB-Overhead fuer ein Ein-Personen-Tool).
 const TODO_PATH = path.join(path.dirname(CONFIG_PATH), 'todo.json');
 
@@ -310,6 +324,9 @@ function printBanner() {
   }
   if (loadProjectInstructions(config.projectRoot)) {
     console.log(`${ANSI.dim}Projekt-Instruktionen geladen aus ${PROJECT_INSTRUCTIONS_FILENAME}.${ANSI.reset}`);
+  }
+  if (loadProjectMemory(config.projectRoot)) {
+    console.log(`${ANSI.dim}Projekt-Gedaechtnis aus vorherigen Agent-Laeufen gefunden (${PROJECT_MEMORY_FILENAME}).${ANSI.reset}`);
   }
   const target = resolveTarget(config);
   if (!target.apiKey) {
@@ -612,12 +629,14 @@ async function handleCommand(line) {
     console.log(`${ANSI.dim}Einzel-Agent startet: ${role.label}${ANSI.reset}`);
     let stopWaiting = () => {};
     let firstOutput = true;
+    const beforeFiles = new Set(touchedFiles);
     try {
-      await runSwarm({
+      const transcript = await runSwarm({
         config,
         task,
         roles: [role],
         buildToolDefinitions,
+        projectContext: buildAgentContext(config.projectRoot),
         onAgentStart: (r) => {
           console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) ===${ANSI.reset}`);
           firstOutput = true;
@@ -636,6 +655,13 @@ async function handleCommand(line) {
         onEmptyTurn: (r) => { stopWaiting(true); printEmptyTurn(r); },
       });
       console.log(`\n${ANSI.dim}Fertig.${ANSI.reset}\n`);
+      const newFiles = [...touchedFiles].filter((f) => !beforeFiles.has(f));
+      const lastMsg = transcript[transcript.length - 1];
+      appendProjectMemory(config.projectRoot, {
+        task,
+        files: newFiles,
+        summary: lastMsg ? shorten(lastMsg.content, 500) : '(keine Textzusammenfassung)',
+      });
     } catch (err) {
       stopWaiting(true);
       console.log(`\n${ANSI.error}Fehler: ${err.message || err}${ANSI.reset}\n`);
@@ -869,12 +895,14 @@ async function runSwarmCommand(task) {
   let turnCount = 0;
   let stopWaiting = () => {};
   let firstOutput = true;
+  const beforeFiles = new Set(touchedFiles);
   try {
-    await runSwarm({
+    const transcript = await runSwarm({
       config,
       task,
       roles: orderedRoles,
       buildToolDefinitions,
+      projectContext: buildAgentContext(config.projectRoot),
       onAgentStart: (role) => {
         turnCount++;
         console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${role.label} (${role.model}) ===${ANSI.reset}`);
@@ -894,6 +922,13 @@ async function runSwarmCommand(task) {
       onEmptyTurn: (role) => { emptyTurnCount++; stopWaiting(true); printEmptyTurn(role); },
     });
     console.log(`\n${ANSI.dim}Swarm fertig. (${turnCount} Zuege, ${retryCount} Retries, ${emptyTurnCount} leere Zuege)${ANSI.reset}\n`);
+    const newFiles = [...touchedFiles].filter((f) => !beforeFiles.has(f));
+    const lastMsg = transcript[transcript.length - 1];
+    appendProjectMemory(config.projectRoot, {
+      task,
+      files: newFiles,
+      summary: lastMsg ? shorten(lastMsg.content, 500) : '(keine Textzusammenfassung)',
+    });
   } catch (err) {
     stopWaiting(true);
     console.log(`\n${ANSI.error}Swarm-Fehler: ${err.message || err}${ANSI.reset}\n`);
@@ -927,6 +962,7 @@ async function runHiveCommand(task) {
   // Deshalb hier overwrite:false (eigene Log-Zeile alle 15s, sicher unter Nebenlaeufigkeit).
   const workerWaiters = new Map();
   let coordinatorRetries = 0;
+  const beforeFiles = new Set(touchedFiles);
   try {
     const result = await runHive({
       config,
@@ -934,6 +970,7 @@ async function runHiveCommand(task) {
       coordinatorRole,
       workerRoles,
       buildToolDefinitions,
+      projectContext: buildAgentContext(config.projectRoot),
       onAgentStart: (r) => {
         console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) ===${ANSI.reset}`);
         firstOutput = true;
@@ -982,6 +1019,12 @@ async function runHiveCommand(task) {
       console.log(
         `\n${ANSI.dim}Hive fertig. (${workerCount} Worker gestartet, ${workerErrorCount} Fehler, ${retryCount} Retries, ${emptyTurnCount} leere Zuege${coordinatorRetries ? `, ${coordinatorRetries} Coordinator-Neustarts` : ''})${ANSI.reset}\n`
       );
+      const newFiles = [...touchedFiles].filter((f) => !beforeFiles.has(f));
+      appendProjectMemory(config.projectRoot, {
+        task,
+        files: newFiles,
+        summary: shorten(result.finalText || '(keine Textzusammenfassung)', 500),
+      });
     }
   } catch (err) {
     stopWaiting(true);
@@ -1030,8 +1073,8 @@ async function compactHistoryIfNeeded() {
 async function attemptChat(activeConfig) {
   const styleMsg = styleSystemMessage(activeConfig.style);
   const effortMsg = effortSystemMessage(activeConfig.effort);
-  const projectInstructions = loadProjectInstructions(activeConfig.projectRoot);
-  const projectMsg = projectInstructions ? { role: 'system', content: projectInstructions } : null;
+  const agentContext = buildAgentContext(activeConfig.projectRoot);
+  const projectMsg = agentContext ? { role: 'system', content: agentContext } : null;
   const extraMessages = [fableSystemMessage(), styleMsg, effortMsg, projectMsg].filter(Boolean);
   let assistantText = '';
   let firstOutput = true;

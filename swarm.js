@@ -77,7 +77,7 @@ function buildDispatchTool(workerRoles) {
 // stillschweigend mit 0 Workern abzuschliessen.
 const MAX_COORDINATOR_ATTEMPTS = 2;
 
-async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {}, onCoordinatorRetry = () => {} }) {
+async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {}, onCoordinatorRetry = () => {}, projectContext = null }) {
   const dispatchTool = buildDispatchTool(workerRoles);
   // Coordinator bekommt volle Datei-Tools (er delegiert primaer, kann aber selbst nachschauen).
   const fileTools = buildToolDefinitions(config.projectRoot);
@@ -100,6 +100,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
     const coordinatorMessages = [
       { role: 'system', content: coordinatorRole.systemPrompt },
       fableSystemMessage(),
+      ...(projectContext ? [{ role: 'system', content: projectContext }] : []),
       { role: 'user', content: `Team-Aufgabe: ${task}` },
     ];
     if (attempt > 1) {
@@ -152,6 +153,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
                 messages: [
                   { role: 'system', content: role.systemPrompt },
                   fableSystemMessage(),
+                  ...(projectContext ? [{ role: 'system', content: projectContext }] : []),
                   { role: 'user', content: a.task },
                 ],
                 tools: workerTools,
@@ -206,7 +208,7 @@ function maxTotalTurns(roleCount) {
 // tatsaechlich einen weiteren Zug, statt dass die Nachricht ungelesen verpufft).
 // buildToolDefinitions/onFileToolCall kommen vom Aufrufer (index.js), damit swarm.js nichts
 // ueber Pfad-Sandboxing oder die Bestaetigungs-UI wissen muss.
-async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStart, onChunk, onNotice, onFileToolCall, onRetry, onEmptyTurn = () => {} }) {
+async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStart, onChunk, onNotice, onFileToolCall, onRetry, onEmptyTurn = () => {}, projectContext = null }) {
   const transcript = [{ role: 'user', content: `Team-Aufgabe: ${task}` }];
   const mailbox = {};
   const turnQueue = [...roles];
@@ -225,6 +227,7 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
     const roleMessages = [
       { role: 'system', content: role.systemPrompt },
       fableSystemMessage(),
+      ...(projectContext ? [{ role: 'system', content: projectContext }] : []),
       ...(styleMsg ? [styleMsg] : []),
       ...transcript,
       ...pending.map((m) => ({ role: 'user', content: speakerTag(`Nachricht von ${m.from}`, m.content) })),
