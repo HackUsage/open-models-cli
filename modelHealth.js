@@ -1,19 +1,55 @@
 'use strict';
 
-// Selbstdiagnose: sammelt pro Modell-Preset ueber die Laufzeit des Prozesses (nicht
-// persistiert -- ein neuer Start faengt neutral an), wie oft es Retries braucht, wie oft
-// es am Ende trotzdem fehlschlaegt und wie lange es im Schnitt dauert. Ziel: Rollen, deren
-// zugewiesenes Modell sich als unzuverlaessig/langsam erweist, automatisch auf ein anderes
-// Modell umleiten, statt bei jedem Zug erneut lange Retry-Ketten zu produzieren.
+const fs = require('fs');
+const path = require('path');
+const { CONFIG_PATH } = require('./providers');
+
+// Selbstdiagnose: sammelt pro Modell-Preset, wie oft es Retries braucht, wie oft es am Ende
+// trotzdem fehlschlaegt und wie lange es im Schnitt dauert. Ziel: Rollen, deren zugewiesenes
+// Modell sich als unzuverlaessig/langsam erweist, automatisch auf ein anderes Modell
+// umleiten, statt bei jedem Zug erneut lange Retry-Ketten zu produzieren. Persistiert nach
+// jedem Aufruf (~/.claude-nemotron-cli/model-health.json) -- ohne das wuerde jeder Neustart
+// wieder bei null anfangen und die ersten (langsamen) Lern-Aufrufe pro Modell wiederholen.
 const MIN_SAMPLES = 2;
 const UNHEALTHY_ERROR_RATE = 0.5;
 const UNHEALTHY_RETRY_RATIO = 1.5;
 const SLOW_MS_THRESHOLD = 45000;
 
-const stats = new Map();
+const HEALTH_PATH = path.join(path.dirname(CONFIG_PATH), 'model-health.json');
+// Alte Diagnosedaten (z.B. von einem laengst behobenen Anbieter-Ausfall vor Tagen) sollen
+// ein Modell nicht auf ewig blockieren -- nach STALE_MS wird ein Eintrag beim Laden
+// verworfen, das Modell bekommt beim naechsten Start wieder eine neutrale Chance.
+const STALE_MS = 6 * 60 * 60 * 1000;
+
+function loadStats() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(HEALTH_PATH, 'utf-8'));
+    const now = Date.now();
+    const map = new Map();
+    for (const [key, entry] of Object.entries(raw)) {
+      if (entry && typeof entry.updatedAt === 'number' && now - entry.updatedAt < STALE_MS) {
+        map.set(key, entry);
+      }
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function saveStats() {
+  try {
+    fs.mkdirSync(path.dirname(HEALTH_PATH), { recursive: true });
+    fs.writeFileSync(HEALTH_PATH, JSON.stringify(Object.fromEntries(stats), null, 2), 'utf-8');
+  } catch {
+    /* Persistenz ist ein Komfortfeature, kein Fehlerfall wert */
+  }
+}
+
+const stats = loadStats();
 
 function getStats(modelKey) {
-  if (!stats.has(modelKey)) stats.set(modelKey, { calls: 0, retries: 0, errors: 0, totalMs: 0 });
+  if (!stats.has(modelKey)) stats.set(modelKey, { calls: 0, retries: 0, errors: 0, totalMs: 0, updatedAt: Date.now() });
   return stats.get(modelKey);
 }
 
@@ -23,6 +59,8 @@ function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0 
   s.retries += retries;
   s.errors += errored ? 1 : 0;
   s.totalMs += durationMs;
+  s.updatedAt = Date.now();
+  saveStats();
 }
 
 // Erst ab MIN_SAMPLES Aufrufen urteilen -- ein einzelner Ausreisser (z.B. ein transienter

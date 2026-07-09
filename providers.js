@@ -209,7 +209,7 @@ function isRetryable(err) {
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
-async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry = () => {}, maxTokens = 8192 }) {
+async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry = () => {}, maxTokens = 8192, maxRetries = MAX_RETRIES }) {
   const target = resolveTarget(config);
   if (!target.baseUrl) {
     throw new Error(`Kein Base-URL fuer Anbieter "${target.provider}" gesetzt (/baseurl <url>).`);
@@ -248,9 +248,9 @@ async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry 
         }
         break;
       } catch (err) {
-        if (attempt >= MAX_RETRIES || !isRetryable(err)) throw err;
+        if (attempt >= maxRetries || !isRetryable(err)) throw err;
         const delayMs = RETRY_BASE_DELAY_MS * 2 ** attempt;
-        onRetry(err, attempt + 1, MAX_RETRIES, delayMs);
+        onRetry(err, attempt + 1, maxRetries, delayMs);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }

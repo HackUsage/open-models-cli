@@ -4,6 +4,17 @@ const { sendChat, MODEL_PRESETS } = require('./providers');
 const { styleSystemMessage } = require('./styles');
 const { fableSystemMessage } = require('./fable');
 const { recordAttempt, diagnose, pickReplacement } = require('./modelHealth');
+const { effortMaxTokens } = require('./effort');
+
+// Zeiteffizienz in Swarm/Hive: (1) weniger Retries pro Modell-Aufruf als im Einzel-Chat --
+// bei einem schlechten Modell lohnt sich hier nicht das volle Warten (1s/2s/4s Backoff, bis
+// zu 3x), weil modelHealth.js ohnehin auf ein anderes Preset ausweicht, sobald sich ein
+// Muster zeigt. (2) niedrigerer Token-Deckel als der globale /effort-Standard ("high" =
+// 8192) -- bei parallelen Multi-Agent-Laeufen bringt sehr ausfuehrliches Ausformulieren pro
+// einzelnem Zug wenig zusaetzlichen Wert, kostet aber Zeit. Beides unabhaengig vom globalen
+// /effort-Setting (das bleibt ausschliesslich fuer den Einzel-Chat massgeblich).
+const SWARM_MAX_RETRIES = 1;
+const SWARM_MAX_TOKENS = effortMaxTokens('medium');
 
 const SEND_MESSAGE_TOOL = {
   type: 'function',
@@ -142,6 +153,8 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
         return onFileToolCall(toolCall);
       },
       onRetry: (...a) => { workerRetries++; onRetry(...a); },
+      maxRetries: SWARM_MAX_RETRIES,
+      maxTokens: SWARM_MAX_TOKENS,
     });
     recordAttempt(effectiveModel, { retries: workerRetries, errored: false, durationMs: Date.now() - startMs });
     if (!text.trim() && !toolCallHappened) {
@@ -250,6 +263,8 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
             .map((o) => (o.error ? `[${o.label}] FEHLER: ${o.error}` : `[${o.label}] ${o.text}`))
             .join('\n\n');
         },
+        maxRetries: SWARM_MAX_RETRIES,
+        maxTokens: SWARM_MAX_TOKENS,
       });
       recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: false, durationMs: Date.now() - startMs });
     } catch (err) {
@@ -344,6 +359,8 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
           }
           return onFileToolCall(toolCall);
         },
+        maxRetries: SWARM_MAX_RETRIES,
+        maxTokens: SWARM_MAX_TOKENS,
       });
       recordAttempt(effectiveModel, { retries: roleRetries, errored: false, durationMs: Date.now() - startMs });
     } catch (err) {
@@ -400,6 +417,8 @@ async function runConsensusCheck({ config, task, files, buildToolDefinitions, on
           onChunk: (d) => { text += d; },
           onToolCall: onFileToolCall,
           onRetry,
+          maxRetries: SWARM_MAX_RETRIES,
+          maxTokens: SWARM_MAX_TOKENS,
         });
       } catch (err) {
         text = `NACHBESSERUNG\n(Fehler beim Bewerten: ${err.message || err})`;
