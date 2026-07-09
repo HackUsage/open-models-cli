@@ -237,9 +237,9 @@ const COMMAND_HELP = {
   projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
   agent: { short: 'Genau EINE Rolle ad-hoc auf eine Aufgabe ansetzen', long: 'Anders als /swarm: keine feste Pipeline-Reihenfolge, nur die eine angegebene Rolle fuer genau einen Zug. Sinnvoll fuer kleine Einzelaufgaben, wo Planner->Coder->Reviewer ueberdimensioniert waere.' },
-  team: { short: 'Fragt nach: /swarm oder /hive fuer diese Aufgabe?', long: 'Reine Rueckfrage-Huelle, kein eigener Modus -- startet je nach Antwort entweder /swarm oder /hive. /team loop [n] <aufgabe> fragt einmal, wiederholt die gewaehlte Variante dann bis zu n-mal.' },
-  swarm: { short: 'Feste Pipeline (Planner -> Coder -> Reviewer, Ruecksprache moeglich)', long: 'Reihenfolge aus agents/pipeline.json. Rollen koennen sich per send_message gegenseitig erneut anstossen (Ruecksprache). Laeuft autonom, siehe /swarmautonomy. /swarm loop [n] <aufgabe> wiederholt bis zu n-mal (Default 3), baut dabei auf der Projekt-Gedaechtnis-Datei auf und bricht frueher ab, falls eine Rolle mark_task_complete aufruft.' },
-  hive: { short: 'Coordinator verteilt Teilaufgaben an >=5 Worker PARALLEL', long: 'Ein Coordinator-Modell zerlegt die Aufgabe und dispatcht per Tool-Call gleichzeitig an mehrere Worker-Rollen (echte parallele HTTP-Requests, bis zu 2 Verschachtelungsebenen). Nach Abschluss pruefen 3 unabhaengige Modelle per Konsens, ob wirklich fertig ist. /hive loop [n] <aufgabe> wiederholt bis zu n-mal (Default 3).' },
+  team: { short: 'Fragt nach: /swarm oder /hive fuer diese Aufgabe?', long: 'Reine Rueckfrage-Huelle, kein eigener Modus -- startet je nach Antwort entweder /swarm oder /hive. /team loop [n] <aufgabe> fragt einmal, wiederholt die gewaehlte Variante dann unbegrenzt (oder n-mal, falls angegeben) -- /stop waehrend des Laufs beendet manuell.' },
+  swarm: { short: 'Feste Pipeline (Planner -> Coder -> Reviewer, Ruecksprache moeglich)', long: 'Reihenfolge aus agents/pipeline.json. Rollen koennen sich per send_message gegenseitig erneut anstossen (Ruecksprache). Laeuft autonom, siehe /swarmautonomy. /swarm loop [n] <aufgabe> wiederholt unbegrenzt (oder n-mal, falls angegeben), baut dabei auf der Projekt-Gedaechtnis-Datei auf, bricht frueher ab bei mark_task_complete, oder per "/stop" waehrend des Laufs manuell beendbar.' },
+  hive: { short: 'Coordinator verteilt Teilaufgaben an >=5 Worker PARALLEL', long: 'Ein Coordinator-Modell zerlegt die Aufgabe und dispatcht per Tool-Call gleichzeitig an mehrere Worker-Rollen (echte parallele HTTP-Requests, bis zu 2 Verschachtelungsebenen). Nach Abschluss pruefen 3 unabhaengige Modelle per Konsens, ob wirklich fertig ist. /hive loop [n] <aufgabe> wiederholt unbegrenzt (oder n-mal, falls angegeben) -- /stop waehrend des Laufs beendet manuell.' },
   panel: { short: 'Judge-Panel: 3 Modelle parallel, 1 Richter waehlt/synthetisiert', long: 'Keine Datei-Tools -- reiner Text-Vergleich fuer Fragen, wo mehrere unabhaengige Meinungen sinnvoll sind (z.B. Architektur-Entscheidungen).' },
   style: { short: 'Antwortstil setzen (caveman/ponytail/off)', long: 'Wirkt als zusaetzliche System-Nachricht bei Einzel-Chat und Swarm/Hive-Rollen.' },
   effort: { short: 'Gruendlichkeit/Antwortlaenge steuern', long: 'low|medium|high|xhigh -- kein echtes Thinking-Budget (OpenAI-kompatible Endpunkte haben das nicht), nur Antwortlaenge + Gruendlichkeits-Hinweis.' },
@@ -742,7 +742,7 @@ async function handleCommand(line) {
     const loopArgs = parseLoopArgs(arg);
     if (loopArgs) {
       if (!loopArgs.task) {
-        console.log(`${ANSI.error}Nutzung: /swarm loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        console.log(`${ANSI.error}Nutzung: /swarm loop [n] <aufgabe>  (n optional -- ohne n unbegrenzt, /stop zum manuellen Beenden)${ANSI.reset}\n`);
         return;
       }
       await runLoopCommand('swarm', loopArgs.n, loopArgs.task);
@@ -759,7 +759,7 @@ async function handleCommand(line) {
     const loopArgs = parseLoopArgs(arg);
     if (loopArgs) {
       if (!loopArgs.task) {
-        console.log(`${ANSI.error}Nutzung: /hive loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        console.log(`${ANSI.error}Nutzung: /hive loop [n] <aufgabe>  (n optional -- ohne n unbegrenzt, /stop zum manuellen Beenden)${ANSI.reset}\n`);
         return;
       }
       await runLoopCommand('hive', loopArgs.n, loopArgs.task);
@@ -776,7 +776,7 @@ async function handleCommand(line) {
     const loopArgs = parseLoopArgs(arg);
     if (loopArgs) {
       if (!loopArgs.task) {
-        console.log(`${ANSI.error}Nutzung: /team loop [n] <aufgabe>  (n optional, Default 3)${ANSI.reset}\n`);
+        console.log(`${ANSI.error}Nutzung: /team loop [n] <aufgabe>  (n optional -- ohne n unbegrenzt, /stop zum manuellen Beenden)${ANSI.reset}\n`);
         return;
       }
       const loopAnswer = (await askQuestion(`${ANSI.bold}Swarm (feste Pipeline) oder Hive (Coordinator, parallel, >=5 Worker)? [swarm/hive] ${ANSI.reset}`)).toLowerCase();
@@ -965,58 +965,72 @@ const MARK_COMPLETE_TOOL = {
 };
 
 // "/swarm loop [n] <aufgabe>" / "/hive loop [n] <aufgabe>" / "/team loop [n] <aufgabe>" --
-// n ist optional (Default 3). Kein echter Hintergrundprozess (bleibt synchron/REPL-gebunden
-// wie der Rest des Tools) -- laeuft einfach bis zu n-mal hintereinander im aktuellen Prozess,
-// nutzt dabei automatisch die Projekt-Gedaechtnis-Datei (Phase B) als wachsenden Kontext, so
-// dass Durchlauf 2 auf Durchlauf 1 aufbaut statt neu anzufangen. /exit oder Strg+C beendet wie
-// gewohnt den ganzen Prozess (kein separater Stop-Befehl fuer nur den Loop noetig).
+// n ist optional; OHNE n laeuft der Loop UNBEGRENZT (bis mark_task_complete oder manuelles
+// /stop waehrend des Laufs). Mit expliziter Zahl bleibt eine feste Obergrenze weiter moeglich.
+// Kein echter Hintergrundprozess (bleibt synchron/REPL-gebunden wie der Rest des Tools) --
+// laeuft einfach hintereinander im aktuellen Prozess, nutzt dabei automatisch die Projekt-
+// Gedaechtnis-Datei (Phase B) als wachsenden Kontext, so dass Durchlauf 2 auf Durchlauf 1
+// aufbaut statt neu anzufangen.
 function parseLoopArgs(arg) {
   const parts = arg.split(' ');
   if (parts[0] !== 'loop') return null;
   const rest = parts.slice(1);
   const maybeN = Number(rest[0]);
   const hasN = Number.isInteger(maybeN) && maybeN > 0;
-  const n = hasN ? maybeN : 3;
+  const n = hasN ? maybeN : Infinity;
   const task = (hasN ? rest.slice(1) : rest).join(' ').trim();
   return { n, task };
 }
 
 async function runLoopCommand(kind, n, task) {
+  const unbounded = !Number.isFinite(n);
   console.log(
-    `${ANSI.dim}${kind === 'hive' ? 'Hive' : 'Swarm'}-Loop startet: bis zu ${n} Durchlaeufe (bricht frueher ab, falls eine Rolle mark_task_complete aufruft).${ANSI.reset}\n`
+    `${ANSI.dim}${kind === 'hive' ? 'Hive' : 'Swarm'}-Loop startet: ${unbounded ? 'unbegrenzt viele Durchlaeufe' : `bis zu ${n} Durchlaeufe`} ` +
+      `(bricht frueher ab bei mark_task_complete). Waehrend des Laufs "/stop" oder "stop" + Enter tippen, um manuell abzubrechen.${ANSI.reset}\n`
   );
-  for (let i = 1; i <= n; i++) {
-    console.log(`\n${ANSI.accent}${ANSI.bold}=== Loop-Durchlauf ${i}/${n} ===${ANSI.reset}`);
-    let stopped = false;
-    let stopReason = '';
-    const loopBuildTools = (root, toolOpts) => [...buildToolDefinitions(root, toolOpts), MARK_COMPLETE_TOOL];
-    const loopFileToolCall = (toolCall) => {
-      if (toolCall.function.name === 'mark_task_complete') {
-        let args = {};
-        try {
-          args = JSON.parse(toolCall.function.arguments || '{}');
-        } catch {
-          /* leeres Objekt reicht als Fallback */
+  loopActive = true;
+  loopStopRequested = false;
+  try {
+    for (let i = 1; unbounded || i <= n; i++) {
+      console.log(`\n${ANSI.accent}${ANSI.bold}=== Loop-Durchlauf ${i}${unbounded ? '' : `/${n}`} ===${ANSI.reset}`);
+      let stopped = false;
+      let stopReason = '';
+      const loopBuildTools = (root, toolOpts) => [...buildToolDefinitions(root, toolOpts), MARK_COMPLETE_TOOL];
+      const loopFileToolCall = (toolCall) => {
+        if (toolCall.function.name === 'mark_task_complete') {
+          let args = {};
+          try {
+            args = JSON.parse(toolCall.function.arguments || '{}');
+          } catch {
+            /* leeres Objekt reicht als Fallback */
+          }
+          stopped = true;
+          stopReason = args.reason || '(kein Grund angegeben)';
+          return `OK: Gesamtaufgabe als abgeschlossen markiert (${stopReason}).`;
         }
-        stopped = true;
-        stopReason = args.reason || '(kein Grund angegeben)';
-        return `OK: Gesamtaufgabe als abgeschlossen markiert (${stopReason}).`;
+        return handleToolCall(toolCall, { swarmMode: true });
+      };
+
+      if (kind === 'hive') {
+        await runHiveCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
+      } else {
+        await runSwarmCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
       }
-      return handleToolCall(toolCall, { swarmMode: true });
-    };
 
-    if (kind === 'hive') {
-      await runHiveCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
-    } else {
-      await runSwarmCommand(task, { buildToolDefinitions: loopBuildTools, onFileToolCall: loopFileToolCall });
+      if (stopped) {
+        console.log(`\n${ANSI.dim}Loop vorzeitig beendet nach Durchlauf ${i}: ${stopReason}${ANSI.reset}\n`);
+        return;
+      }
+      if (loopStopRequested) {
+        console.log(`\n${ANSI.dim}Loop auf Nutzerwunsch nach Durchlauf ${i} gestoppt.${ANSI.reset}\n`);
+        return;
+      }
     }
-
-    if (stopped) {
-      console.log(`\n${ANSI.dim}Loop vorzeitig beendet nach Durchlauf ${i}/${n}: ${stopReason}${ANSI.reset}\n`);
-      return;
-    }
+    console.log(`${ANSI.dim}Loop-Limit (${n}) erreicht -- Loop beendet.${ANSI.reset}\n`);
+  } finally {
+    loopActive = false;
+    loopStopRequested = false;
   }
-  console.log(`${ANSI.dim}Loop-Limit (${n}) erreicht -- Loop beendet.${ANSI.reset}\n`);
 }
 
 // opts.buildToolDefinitions/opts.onFileToolCall: Ueberschreibbar fuer den Loop-Modus (fuegt
@@ -1418,6 +1432,15 @@ async function handleMessage(text) {
 const questionQueue = [];
 let questionActive = false;
 
+// Loop-Abbruch per Prompt WAEHREND ein Loop laeuft: braucht denselben Seitenkanal-Trick wie
+// die Frage-Queue oben, sonst wuerde eine getippte "/stop"-Zeile einfach hinten an die
+// normale Befehls-Queue angehaengt und erst NACH dem kompletten (jetzt potenziell
+// unbegrenzten) Loop verarbeitet -- der Nutzer koennte also gar nicht eingreifen. loopActive
+// wird von runLoopCommand gesetzt/zurueckgesetzt, loopStopRequested von rl.on('line') unten.
+let loopActive = false;
+let loopStopRequested = false;
+const STOP_COMMANDS = new Set(['/stop', 'stop', '/abbrechen', 'abbrechen']);
+
 function processQuestionQueue() {
   if (questionActive || !questionQueue.length) return;
   questionActive = true;
@@ -1572,6 +1595,14 @@ rl.on('line', (line) => {
     questionActive = false;
     resolve(trimmed);
     processQuestionQueue();
+    return;
+  }
+  // Gleicher Seitenkanal-Grund wie oben: waehrend ein (jetzt potenziell unbegrenzter) Loop
+  // laeuft, muss "/stop" SOFORT wirken, nicht erst nach dem Loop aus der Queue verarbeitet
+  // werden -- sonst koennte der Nutzer einen unbegrenzten Loop nie manuell beenden.
+  if (loopActive && STOP_COMMANDS.has(trimmed.toLowerCase())) {
+    loopStopRequested = true;
+    console.log(`${ANSI.dim}[Loop] Abbruch angefordert -- wird nach dem aktuellen Durchlauf gestoppt.${ANSI.reset}`);
     return;
   }
   queue = queue.then(() => processLine(trimmed));
