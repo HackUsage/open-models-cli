@@ -21,19 +21,28 @@ const HEALTH_PATH = path.join(path.dirname(CONFIG_PATH), 'model-health.json');
 // verworfen, das Modell bekommt beim naechsten Start wieder eine neutrale Chance.
 const STALE_MS = 6 * 60 * 60 * 1000;
 
-function loadStats() {
+const stats = new Map();
+
+// Mehrere CLI-Instanzen koennen gleichzeitig laufen (eigene Prozesse, kein gemeinsamer
+// Speicher) -- ohne das hier wuerde jede Instanz beim Speichern blind ihren EIGENEN,
+// moeglicherweise veralteten Stand ueberschreiben und damit alles verwerfen, was eine
+// ANDERE Instanz inzwischen gelernt hat (z.B. "Modell X ist gerade limitiert"). Deshalb:
+// vor jedem Lesen UND vor jedem Schreiben frisch von der Platte einlesen, statt sich auf
+// einen einmal beim Start geladenen In-Memory-Stand zu verlassen -- macht die Selbstdiagnose
+// instanzuebergreifend konsistent (kein Lock noetig, die Datei ist klein, ein Re-Read kostet
+// Mikrosekunden gegenueber Modell-Aufrufen, die Sekunden bis Minuten dauern).
+function reloadFromDisk() {
   try {
     const raw = JSON.parse(fs.readFileSync(HEALTH_PATH, 'utf-8'));
     const now = Date.now();
-    const map = new Map();
+    stats.clear();
     for (const [key, entry] of Object.entries(raw)) {
       if (entry && typeof entry.updatedAt === 'number' && now - entry.updatedAt < STALE_MS) {
-        map.set(key, entry);
+        stats.set(key, entry);
       }
     }
-    return map;
   } catch {
-    return new Map();
+    /* Datei fehlt/kaputt -- mit dem bisherigen In-Memory-Stand weitermachen */
   }
 }
 
@@ -45,8 +54,6 @@ function saveStats() {
     /* Persistenz ist ein Komfortfeature, kein Fehlerfall wert */
   }
 }
-
-const stats = loadStats();
 
 function getStats(modelKey) {
   if (!stats.has(modelKey)) stats.set(modelKey, { calls: 0, retries: 0, errors: 0, totalMs: 0, permanent: false, updatedAt: Date.now() });
@@ -65,6 +72,7 @@ function isPermanentError(message) {
 }
 
 function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0, errorMessage = '' } = {}) {
+  reloadFromDisk(); // erst den aktuellen (evtl. von anderen Instanzen aktualisierten) Stand holen
   const s = getStats(modelKey);
   s.calls += 1;
   s.retries += retries;
@@ -78,7 +86,10 @@ function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0,
 // Erst ab MIN_SAMPLES Aufrufen urteilen -- ein einzelner Ausreisser (z.B. ein transienter
 // 503) soll nicht sofort zum Modell-Wechsel fuehren, ein wiederkehrendes Muster schon.
 // Ausnahme: s.permanent (siehe isPermanentError) gilt sofort, unabhaengig von MIN_SAMPLES.
+// Liest ebenfalls frisch von der Platte -- eine Entscheidung soll den neuesten Stand sehen,
+// auch wenn eine ANDERE Instanz seit dem letzten eigenen Aufruf etwas dazugelernt hat.
 function diagnose(modelKey) {
+  reloadFromDisk();
   const s = stats.get(modelKey);
   if (!s) return { unhealthy: false, reason: null };
   if (s.permanent) {
