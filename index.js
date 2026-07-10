@@ -273,12 +273,18 @@ const COMMAND_HELP = {
   exit: { short: 'Programm beenden', long: '' },
 };
 
-const BUILTIN_COMMANDS = [
-  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'hivedepth', 'trace', 'modelhealth', 'baseurl', 'projectroot',
-  'agents', 'agent', 'team', 'swarm', 'hive', 'panel', 'style', 'effort',
-  'permission', 'plan', 'autoapprove', 'swarmautonomy', 'todo', 'history', 'codemap', 'undo',
-  'usage', 'mcp', 'help', 'settings', 'new', 'exit',
+// Gruppiert statt einer flachen, historisch gewachsenen Liste -- /help zeigt die Gruppen-Titel
+// als Zwischenueberschriften, Tab-Vervollstaendigung nutzt weiterhin die flache Ableitung unten.
+const COMMAND_GROUPS = [
+  { title: 'Modelle & Anbieter', commands: ['models', 'model', 'recommend', 'fallback', 'provider', 'baseurl', 'modelhealth'] },
+  { title: 'API-Keys (mehrere Accounts)', commands: ['setkey', 'addkey', 'removekey', 'keys'] },
+  { title: 'Agenten & Teams', commands: ['agents', 'agent', 'swarm', 'hive', 'team', 'panel', 'hivedepth', 'trace'] },
+  { title: 'Sicherheit & Berechtigungen', commands: ['permission', 'plan', 'autoapprove', 'swarmautonomy'] },
+  { title: 'Projekt & Werkzeuge', commands: ['projectroot', 'codemap', 'undo', 'todo', 'mcp'] },
+  { title: 'Verhalten & Ausgabe', commands: ['style', 'effort'] },
+  { title: 'Sitzung & Sonstiges', commands: ['new', 'history', 'usage', 'settings', 'help', 'exit'] },
 ];
+const BUILTIN_COMMANDS = COMMAND_GROUPS.flatMap((g) => g.commands);
 
 // Tab-Vervollstaendigung: erstes Wort = Slash-Command (eingebaut + eigene commands/*.md),
 // jedes weitere Wort = Datei-/Ordnerpfad relativ zu config.projectRoot. Rein synchrone Logik,
@@ -437,11 +443,16 @@ function printEmptyTurn(role) {
 }
 
 // Selbstdiagnose (modelHealth.js) hat entschieden, dass das Modell dieser Rolle zu oft
-// Retries/Fehler/Langsamkeit produziert -- fuer diesen Zug automatisch ersetzt.
+// Retries/Fehler/Langsamkeit produziert -- fuer diesen Zug automatisch ersetzt. Identische
+// Wechsel-Meldungen direkt hintereinander (z.B. jeder Loop-Durchlauf trifft dieselbe
+// Entscheidung neu) werden nur EINMAL gedruckt -- der gemeldete Log-Spam bestand zu einem
+// grossen Teil aus exakt derselben Zeile in jeder Runde.
+let lastModelSwapLine = '';
 function printModelSwap(role, oldModel, newModel, reason) {
-  console.log(
-    `\n${ANSI.error}[Modell-Wechsel] ${role.label}: "${oldModel}" wirkt unzuverlaessig (${reason}) -- fuer diesen Zug ersetzt durch "${newModel}".${ANSI.reset}`
-  );
+  const line = `[Modell-Wechsel] ${role.label}: "${oldModel}" wirkt unzuverlaessig (${reason}) -- ersetzt durch "${newModel}".`;
+  if (line === lastModelSwapLine) return;
+  lastModelSwapLine = line;
+  console.log(`\n${ANSI.error}${line}${ANSI.reset}`);
 }
 
 // ponytail: reine Keyword-Heuristik, kein gelerntes Routing -- reicht als grobe Empfehlung,
@@ -646,7 +657,18 @@ async function handleCommand(line) {
     }
     config.keys[providerArg].push(key);
     saveConfig(config);
-    console.log(`${ANSI.dim}Weiterer Key fuer ${PROVIDERS[providerArg].label} hinzugefuegt (jetzt ${config.keys[providerArg].length}). Automatischer Wechsel bei Limit aktiv.${ANSI.reset}\n`);
+    // Kontingent-Sperren sind PRO KEY, modelHealth sperrt aber das MODELL "permanent" -- ein
+    // neuer Key bringt frisches Kontingent, also die quota-basierten Modell-Sperren dieses
+    // Anbieters aufheben. Sonst: Nutzer traegt 3 neue Accounts ein und die Modelle bleiben
+    // trotzdem gesperrt, weil die Sperre noch vom alten, erschoepften Key stammt.
+    let unlocked = 0;
+    for (const [presetKey, preset] of Object.entries(MODEL_PRESETS)) {
+      if (preset.provider === providerArg && listHealth([presetKey])[0].permanent) {
+        resetHealth(presetKey);
+        unlocked++;
+      }
+    }
+    console.log(`${ANSI.dim}Weiterer Key fuer ${PROVIDERS[providerArg].label} hinzugefuegt (jetzt ${config.keys[providerArg].length}). Automatischer Wechsel bei Limit aktiv.${unlocked ? ` ${unlocked} kontingent-gesperrte(s) Modell(e) dieses Anbieters wieder freigegeben (neuer Key = frisches Kontingent).` : ''}${ANSI.reset}\n`);
     return;
   }
   if (cmd === 'removekey') {
@@ -1041,9 +1063,12 @@ async function handleCommand(line) {
   if (cmd === 'help') {
     if (!arg) {
       console.log(`${ANSI.dim}Befehle (${ANSI.bold}/help <befehl>${ANSI.reset}${ANSI.dim} fuer Details):${ANSI.reset}`);
-      for (const name of BUILTIN_COMMANDS) {
-        const h = COMMAND_HELP[name];
-        console.log(`${ANSI.dim}  /${name.padEnd(16)} ${h ? h.short : ''}${ANSI.reset}`);
+      for (const group of COMMAND_GROUPS) {
+        console.log(`\n${ANSI.accent}${group.title}${ANSI.reset}`);
+        for (const name of group.commands) {
+          const h = COMMAND_HELP[name];
+          console.log(`${ANSI.dim}  /${name.padEnd(16)} ${h ? h.short : ''}${ANSI.reset}`);
+        }
       }
       const custom = listCustomCommands();
       if (custom.length) {

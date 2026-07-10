@@ -104,8 +104,9 @@ typisiertes Memory-System, gleichzeitige benannte Sessions (Architektur-Mismatch
 ## Selbstdiagnose + automatischer Modell-Wechsel (modelHealth.js)
 
 Auf Nutzerwunsch: manche Modelle brauchen sehr lange oder werfen haeufig Fehler, was zu vielen
-Retries und viel verlorener Zeit fuehrt. `modelHealth.js` sammelt pro Modell-Preset (In-Memory,
-nicht persistiert) Retries/Fehler/Antwortzeit ueber die Laufzeit des Prozesses. Ab dem 2.
+Retries und viel verlorener Zeit fuehrt. `modelHealth.js` sammelt pro Modell-Preset
+Retries/Fehler/Antwortzeit -- persistiert in `model-health.json` (cross-instance, Eintraege
+verfallen nach 6h automatisch, `/modelhealth` zeigt/reset den Stand). Ab dem 2.
 Aufruf eines Modells wird geurteilt: >=50% Fehlerquote, >=1.5 Retries im Schnitt pro Aufruf,
 oder >=45s Antwortzeit im Schnitt gilt als unzuverlaessig/langsam. Betrifft das die naechste
 Rolle, die dieses Modell nutzen wuerde (Einzel-Agent, Swarm-Rolle, Hive-Coordinator/Worker auf
