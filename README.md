@@ -115,6 +115,22 @@ per `[Modell-Wechsel]`-Hinweis. Zusaetzlich werfen einzelne Coordinator-/Rollen-
 jetzt nicht mehr den GESAMTEN Swarm/Hive-Lauf um, sondern werden wie ein leerer Zug behandelt
 und fliessen in die Diagnose ein.
 
+## Mehrere API-Keys pro Anbieter (keyPool.js)
+
+Auf Nutzerwunsch: bei mehreren parallel laufenden Projekten/CLI-Instanzen stoesst ein einzelner
+kostenloser Account irgendwann an sein Limit. `config.keys[provider]` ist jetzt eine LISTE statt
+eines einzelnen Strings -- `/addkey <provider> <key>` fuegt einen weiteren Account hinzu (ohne
+die bestehenden zu ersetzen, dafuer `/setkey`), `/keys` zeigt Anzahl + Cooldown-Status,
+`/removekey <provider> <nummer>` entfernt einen. Schlaegt ein Request mit 401/403/429 fehl UND
+es gibt einen weiteren Key, wechselt `sendChat` (providers.js) sofort zum naechsten -- ohne
+Backoff-Wartezeit, sichtbar per `[Retry] Key limitiert (...) -- wechsle zu naechstem Key`. Der
+limitierte Key bekommt einen Cooldown (kurz bei einfachem 429, laenger bei erkennbarer
+Kontingent-/Tageslimit-Meldung, siehe `errorClassify.js`) und wird danach automatisch wieder
+probiert. Zustand liegt in `key-health.json` (Key nur als Hash, nie im Klartext) und wird -- wie
+`model-health.json` -- bei jedem Lesen/Schreiben frisch von der Platte gemergt, damit mehrere
+gleichzeitig laufende CLI-Instanzen sich denselben Key-Pool teilen, ohne sich gegenseitig zu
+ueberschreiben.
+
 ## Fable-Layer, Gedaechtnis, Nested-Hives, Konsens, Loops (Phasen A-E, 2. Runde)
 
 Auf Nutzerwunsch nach echtem Praxiseinsatz (Kontext-Verlust zwischen Modellwechseln, kein
@@ -229,7 +245,10 @@ kostenpflichtige).
 - `/models` -- verfuegbare Presets anzeigen
 - `/model <name>` -- Modell wechseln (Preset-Name oder rohe Modell-ID)
 - `/provider <openrouter|nim|ollama|custom>` -- Anbieter fuer rohe Modell-IDs waehlen
-- `/setkey <openrouter|nim|ollama> <key>` -- Key fuer einen Anbieter setzen
+- `/setkey <openrouter|nim|ollama> <key>` -- Key fuer einen Anbieter setzen (ersetzt ALLE bisherigen)
+- `/addkey <openrouter|nim|ollama> <key>` -- weiteren Key hinzufuegen (mehrere Accounts, Auto-Wechsel bei Limit)
+- `/removekey <provider> <nummer>` -- Key wieder entfernen (Nummer aus `/keys`)
+- `/keys` -- alle Keys je Anbieter auflisten (Anzahl + Cooldown-Status)
 - `/baseurl <url>` -- eigene/custom Base-URL setzen (aktiviert Anbieter "custom")
 - `/settings` -- aktuelle Konfiguration anzeigen
 - `/agents` -- geladene Agent-Rollen anzeigen

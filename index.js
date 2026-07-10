@@ -5,6 +5,7 @@ const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
 const { PROVIDERS, MODEL_PRESETS, loadConfig, saveConfig, sendChat, resolveTarget, CONFIG_PATH } = require('./providers');
+const { isExhausted: isKeyExhausted } = require('./keyPool');
 const { buildToolDefinitions: buildFileTools, WRITE_TOOLS, executeTool, undoLastWrite } = require('./tools');
 const { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS, resetCwd } = require('./shell');
 const { AGENTS_DIR, loadAgentRoles, loadPipelineOrder } = require('./agents');
@@ -232,7 +233,10 @@ const COMMAND_HELP = {
   recommend: { short: 'Modell-Empfehlung fuer eine Aufgabe', long: 'Keyword-Heuristik (kein gelerntes Routing) -- schlaegt anhand der Aufgabenbeschreibung ein passendes Preset vor. /model <preset> uebernimmt die Empfehlung.' },
   fallback: { short: 'Zweitmodell fuer Fehlerfaelle setzen', long: 'Wird nur genutzt, wenn das Hauptmodell nach allen Retries weiter fehlschlaegt (Einzel-Chat). /fallback off deaktiviert.' },
   provider: { short: 'Anbieter fuer nicht-Preset-Modelle waehlen', long: 'Wirkt nur, wenn /model eine eigene Modell-ID (kein Preset) gesetzt hat. Fuer Custom-Endpunkte reicht meist direkt /baseurl (setzt Provider automatisch mit).' },
-  setkey: { short: 'API-Key fuer einen Anbieter speichern', long: '/setkey <openrouter|nim|ollama> <key>. Ollama braucht i.d.R. keinen echten Key.' },
+  setkey: { short: 'API-Key fuer einen Anbieter speichern (ersetzt ALLE bisherigen)', long: '/setkey <openrouter|nim|ollama> <key>. Ersetzt die komplette Key-Liste dieses Anbieters durch genau diesen einen Key. Zum Hinzufuegen (mehrere Accounts fuer parallele Projekte) stattdessen /addkey nutzen.' },
+  addkey: { short: 'Weiteren API-Key fuer einen Anbieter hinzufuegen', long: '/addkey <openrouter|nim|ollama> <key>. Ist ein Key limitiert (429/Kontingent), wechselt sendChat automatisch zum naechsten in der Liste -- nuetzlich, wenn mehrere Projekte/CLI-Instanzen parallel laufen und ein Account an sein Limit stoesst. Cooldown-Status je Key: /keys.' },
+  removekey: { short: 'Einen bestimmten API-Key wieder entfernen', long: '/removekey <provider> <nummer>. Nummer aus /keys uebernehmen.' },
+  keys: { short: 'Alle gespeicherten Keys je Anbieter auflisten (maskiert)', long: 'Zeigt Anzahl + Cooldown-Status je Key (limitiert = wartet auf Erholung, siehe key-health.json).' },
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
   projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
@@ -260,7 +264,7 @@ const COMMAND_HELP = {
 };
 
 const BUILTIN_COMMANDS = [
-  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'baseurl', 'projectroot',
+  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'baseurl', 'projectroot',
   'agents', 'agent', 'team', 'swarm', 'hive', 'panel', 'style', 'effort',
   'permission', 'plan', 'autoapprove', 'swarmautonomy', 'todo', 'history', 'codemap', 'undo',
   'usage', 'mcp', 'help', 'settings', 'new', 'exit',
@@ -578,7 +582,10 @@ async function handleCommand(line) {
     return;
   }
   if (cmd === 'settings') {
-    const maskedKeys = Object.fromEntries(Object.entries(config.keys).map(([k, v]) => [k, v ? '(gesetzt)' : '(leer)']));
+    const maskedKeys = Object.fromEntries(Object.entries(config.keys).map(([k, v]) => {
+      const count = (Array.isArray(v) ? v : [v]).filter((x) => x && x.trim()).length;
+      return [k, count ? `${count} Key(s)` : '(leer)'];
+    }));
     console.log(JSON.stringify({ ...config, keys: maskedKeys }, null, 2));
     console.log('');
     return;
@@ -610,9 +617,53 @@ async function handleCommand(line) {
       console.log(`${ANSI.error}Nutzung: /setkey <openrouter|nim|ollama> <key>${ANSI.reset}\n`);
       return;
     }
-    config.keys[providerArg] = key;
+    config.keys[providerArg] = [key];
     saveConfig(config);
-    console.log(`${ANSI.dim}Key fuer ${PROVIDERS[providerArg].label} gespeichert (${CONFIG_PATH}).${ANSI.reset}\n`);
+    console.log(`${ANSI.dim}Key fuer ${PROVIDERS[providerArg].label} gespeichert (ersetzt alle bisherigen, ${CONFIG_PATH}).${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'addkey') {
+    const [providerArg, ...keyParts] = arg.split(' ');
+    const key = keyParts.join(' ').trim();
+    if (!PROVIDERS[providerArg] || providerArg === 'custom' || !key) {
+      console.log(`${ANSI.error}Nutzung: /addkey <openrouter|nim|ollama> <key>${ANSI.reset}\n`);
+      return;
+    }
+    if (!Array.isArray(config.keys[providerArg])) config.keys[providerArg] = [];
+    if (config.keys[providerArg].includes(key)) {
+      console.log(`${ANSI.dim}Dieser Key ist fuer ${PROVIDERS[providerArg].label} schon eingetragen.${ANSI.reset}\n`);
+      return;
+    }
+    config.keys[providerArg].push(key);
+    saveConfig(config);
+    console.log(`${ANSI.dim}Weiterer Key fuer ${PROVIDERS[providerArg].label} hinzugefuegt (jetzt ${config.keys[providerArg].length}). Automatischer Wechsel bei Limit aktiv.${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'removekey') {
+    const [providerArg, idxArg] = arg.split(' ');
+    const idx = Number(idxArg) - 1;
+    const list = Array.isArray(config.keys[providerArg]) ? config.keys[providerArg] : [];
+    if (!PROVIDERS[providerArg] || !(idx >= 0 && idx < list.length)) {
+      console.log(`${ANSI.error}Nutzung: /removekey <provider> <nummer>  (siehe /keys)${ANSI.reset}\n`);
+      return;
+    }
+    list.splice(idx, 1);
+    saveConfig(config);
+    console.log(`${ANSI.dim}Key #${idxArg} fuer ${PROVIDERS[providerArg].label} entfernt (noch ${list.length} uebrig).${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'keys') {
+    for (const p of Object.keys(PROVIDERS)) {
+      if (p === 'custom') continue;
+      const list = Array.isArray(config.keys[p]) ? config.keys[p].filter((k) => k && k.trim()) : [];
+      if (!list.length) {
+        console.log(`${ANSI.dim}${PROVIDERS[p].label}: keine Keys${ANSI.reset}`);
+        continue;
+      }
+      const parts = list.map((k, i) => `#${i + 1}${isKeyExhausted(p, k) ? ' (limitiert)' : ''}`);
+      console.log(`${ANSI.dim}${PROVIDERS[p].label}: ${list.length} Key(s) -- ${parts.join(', ')}${ANSI.reset}`);
+    }
+    console.log('');
     return;
   }
   if (cmd === 'projectroot') {

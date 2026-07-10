@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { getActiveKey, reportKeyFailure } = require('./keyPool');
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude-nemotron-cli');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -36,7 +37,10 @@ const MODEL_PRESETS = {
 };
 
 const DEFAULT_CONFIG = {
-  keys: { openrouter: '', nim: '', ollama: 'ollama' },
+  // Je Anbieter eine LISTE von Keys statt nur einem -- mehrere kostenlose Accounts fuer
+  // parallele Projekte eintragbar (/addkey), sendChat wechselt automatisch zum naechsten,
+  // sobald einer limitiert ist (siehe keyPool.js).
+  keys: { openrouter: [], nim: [], ollama: ['ollama'] },
   customBaseUrl: '',
   activeModel: 'nemotron-super',
   activeProvider: 'openrouter',
@@ -83,6 +87,17 @@ function loadConfig() {
       ...raw,
       keys: { ...DEFAULT_CONFIG.keys, ...(raw.keys || {}) },
     };
+
+    // Migration: einzelner Key als String (altes Schema) -> Liste mit einem Eintrag.
+    for (const p of Object.keys(config.keys)) {
+      if (typeof config.keys[p] === 'string') {
+        config.keys[p] = config.keys[p] ? [config.keys[p]] : [];
+        needsSave = true;
+      } else if (!Array.isArray(config.keys[p])) {
+        config.keys[p] = [];
+      }
+    }
+
     if (needsSave) saveConfig(config);
     return config;
   } catch {
@@ -105,8 +120,10 @@ function resolveTarget(config) {
   const provider = preset ? preset.provider : config.activeProvider;
   const model = preset ? preset.model : config.activeModel;
   const baseUrl = provider === 'custom' ? config.customBaseUrl : PROVIDERS[provider]?.baseUrl;
-  const apiKey = config.keys[provider] || '';
-  return { provider, providerLabel: PROVIDERS[provider]?.label || provider, model, baseUrl, apiKey };
+  const keyList = Array.isArray(config.keys[provider]) ? config.keys[provider] : (config.keys[provider] ? [config.keys[provider]] : []);
+  const keyCount = keyList.filter((k) => k && k.trim()).length;
+  const apiKey = getActiveKey(provider, keyList);
+  return { provider, providerLabel: PROVIDERS[provider]?.label || provider, model, baseUrl, apiKey, keyCount };
 }
 
 // Traegt den HTTP-Status mit, damit sendChat entscheiden kann, ob sich ein Retry lohnt
@@ -238,12 +255,15 @@ function mergeLeadingSystemMessages(messages) {
 }
 
 async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry = () => {}, maxTokens = 8192, maxRetries = MAX_RETRIES }) {
-  const target = resolveTarget(config);
+  let target = resolveTarget(config);
   if (!target.baseUrl) {
     throw new Error(`Kein Base-URL fuer Anbieter "${target.provider}" gesetzt (/baseurl <url>).`);
   }
   if (!target.apiKey) {
-    throw new Error(`Kein API-Key fuer ${target.providerLabel} gesetzt (/setkey ${target.provider} <key>).`);
+    const msg = target.keyCount > 0
+      ? `Alle ${target.keyCount} Key(s) fuer ${target.providerLabel} sind aktuell limitiert (Cooldown) -- kurz warten oder /addkey ${target.provider} <weiterer Key>.`
+      : `Kein API-Key fuer ${target.providerLabel} gesetzt (/setkey ${target.provider} <key>).`;
+    throw new Error(msg);
   }
 
   const loopMessages = mergeLeadingSystemMessages(messages);
@@ -276,6 +296,19 @@ async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry 
         }
         break;
       } catch (err) {
+        // Key-Rotation VOR dem normalen Retry-Pfad: 401/403/429 auf DIESEM Key sind mit einem
+        // Ersatz-Key sofort loesbar (kein Backoff noetig), waehrend derselbe Key erneut zu
+        // versuchen nur denselben Fehler reproduzieren wuerde.
+        const isKeyError = err instanceof ModelError && (err.status === 429 || err.status === 401 || err.status === 403);
+        if (isKeyError && target.keyCount > 1) {
+          reportKeyFailure(target.provider, target.apiKey, err.message);
+          const next = resolveTarget(config);
+          if (next.apiKey && next.apiKey !== target.apiKey) {
+            onRetry(new Error(`Key limitiert (${target.providerLabel}) -- wechsle zu naechstem Key.`), attempt + 1, maxRetries, 0);
+            target = next;
+            continue;
+          }
+        }
         if (attempt >= maxRetries || !isRetryable(err)) throw err;
         const delayMs = RETRY_BASE_DELAY_MS * 2 ** attempt;
         onRetry(err, attempt + 1, maxRetries, delayMs);

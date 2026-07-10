@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { CONFIG_PATH } = require('./providers');
+const { isQuotaMessage } = require('./errorClassify');
 
 // Selbstdiagnose: sammelt pro Modell-Preset, wie oft es Retries braucht, wie oft es am Ende
 // trotzdem fehlschlaegt und wie lange es im Schnitt dauert. Ziel: Rollen, deren zugewiesenes
@@ -65,12 +66,6 @@ function getStats(modelKey) {
 // ein Retry oder ein zweiter Versuch aendert daran nichts. Solche Modelle SOFORT als
 // unhealthy markieren (nicht erst nach MIN_SAMPLES), sonst verschwendet jeder weitere
 // Loop-Durchlauf erneut einen kompletten Versuch auf ein bekannt totes Modell.
-const PERMANENT_ERROR_PATTERN = /rate limit|quota|per-day|per-month|resource ?exhausted/i;
-
-function isPermanentError(message) {
-  return PERMANENT_ERROR_PATTERN.test(message || '');
-}
-
 function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0, errorMessage = '' } = {}) {
   reloadFromDisk(); // erst den aktuellen (evtl. von anderen Instanzen aktualisierten) Stand holen
   const s = getStats(modelKey);
@@ -78,7 +73,7 @@ function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0,
   s.retries += retries;
   s.errors += errored ? 1 : 0;
   s.totalMs += durationMs;
-  if (errored && isPermanentError(errorMessage)) s.permanent = true;
+  if (errored && isQuotaMessage(errorMessage)) s.permanent = true;
   s.updatedAt = Date.now();
   saveStats();
 }
