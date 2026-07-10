@@ -279,6 +279,7 @@ kostenpflichtige).
 - `/keys` -- alle Keys je Anbieter auflisten (Anzahl + Cooldown-Status)
 - `/hivedepth <1-5|auto>` -- Verschachtelungstiefe von `/hive` einstellen oder automatisch empfehlen lassen
 - `/trace [lauf-id]` -- strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen
+- `/modelhealth [preset|reset]` -- Diagnose-Status aller Presets anzeigen, einzeln oder komplett zuruecksetzen
 - `/baseurl <url>` -- eigene/custom Base-URL setzen (aktiviert Anbieter "custom")
 - `/settings` -- aktuelle Konfiguration anzeigen
 - `/agents` -- geladene Agent-Rollen anzeigen

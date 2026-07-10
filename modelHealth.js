@@ -150,4 +150,34 @@ function pickReplacement(currentModelKey, candidateKeys) {
   return best;
 }
 
-module.exports = { recordAttempt, diagnose, pickReplacement };
+// Diagnose-Uebersicht ueber ALLE Presets auf einmal -- Nutzerfrage "warum wechseln die Modelle
+// nur zwischen 2 hin und her, es gibt doch fast 10?" laesst sich damit tatsaechlich beantworten
+// statt geraten: entweder sind wirklich fast alle anderen aktuell (permanent) gesperrt, oder es
+// steckt doch ein Bug in der Auswahl -- ohne diese Uebersicht war beides von aussen ununterscheidbar.
+function listHealth(candidateKeys) {
+  reloadFromDisk();
+  return candidateKeys.map((k) => {
+    const s = stats.get(k);
+    return {
+      key: k,
+      calls: s ? s.calls : 0,
+      errors: s ? s.errors : 0,
+      avgMs: s && s.calls ? Math.round(s.totalMs / s.calls) : null,
+      avgRetries: s && s.calls ? +(s.retries / s.calls).toFixed(1) : null,
+      permanent: s ? !!s.permanent : false,
+      ...diagnose(k),
+    };
+  });
+}
+
+// Manuelles Zuruecksetzen statt auf STALE_MS (6h) zu warten -- z.B. wenn der Nutzer sicher ist,
+// dass ein Anbieter-Ausfall vorbei ist, oder einfach allen Presets wieder eine neutrale Chance
+// geben will, ohne die laufende Sitzung/den Loop dafuer zu unterbrechen.
+function resetHealth(modelKey = null) {
+  reloadFromDisk();
+  if (modelKey) stats.delete(modelKey);
+  else stats.clear();
+  saveStats();
+}
+
+module.exports = { recordAttempt, diagnose, pickReplacement, listHealth, resetHealth };

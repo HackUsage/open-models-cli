@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { PROVIDERS, MODEL_PRESETS, loadConfig, saveConfig, sendChat, resolveTarget, CONFIG_PATH } = require('./providers');
 const { isExhausted: isKeyExhausted } = require('./keyPool');
+const { listHealth, resetHealth } = require('./modelHealth');
 const { buildToolDefinitions: buildFileTools, WRITE_TOOLS, executeTool, undoLastWrite } = require('./tools');
 const { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS, resetCwd } = require('./shell');
 const { AGENTS_DIR, loadAgentRoles, loadPipelineOrder } = require('./agents');
@@ -245,6 +246,7 @@ const COMMAND_HELP = {
   keys: { short: 'Alle gespeicherten Keys je Anbieter auflisten (maskiert)', long: 'Zeigt Anzahl + Cooldown-Status je Key (limitiert = wartet auf Erholung, siehe key-health.json).' },
   hivedepth: { short: 'Verschachtelungstiefe von /hive einstellen', long: '/hivedepth <1-5> setzt sie fest, /hivedepth auto laesst sie automatisch anhand der Anzahl eingetragener API-Keys empfehlen (mehr Keys = weniger Rate-Limit-Risiko = mehr Tiefe vertretbar). Ohne Argument: aktueller Wert + Empfehlung. Achtung: Tiefe wirkt multiplikativ auf Kosten/Laufzeit.' },
   trace: { short: 'Strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen', long: '/trace <lauf-id> zeigt alle Ereignisse (Modell-Wechsel, Key-Wechsel, Worker-Start/-Ende, Konsens-Stimmen) EINES Laufs in Reihenfolge. Ohne Argument: die letzten 30 Ereignisse ueber alle Laeufe. Lauf-ID wird nach jedem Swarm/Hive-Abschluss angezeigt.' },
+  modelhealth: { short: 'Diagnose-Status aller Modell-Presets anzeigen/zuruecksetzen', long: 'Ohne Argument: Aufrufe/Fehler/Antwortzeit/Status (gesund, unhealthy, gesperrt, ungetestet) je Preset -- beantwortet "warum wird nur zwischen 2 Modellen gewechselt" direkt statt zu raten. /modelhealth <preset> setzt nur eins zurueck, /modelhealth reset alle (statt bis zu 6h auf STALE_MS zu warten).' },
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
   projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
@@ -272,7 +274,7 @@ const COMMAND_HELP = {
 };
 
 const BUILTIN_COMMANDS = [
-  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'hivedepth', 'trace', 'baseurl', 'projectroot',
+  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'hivedepth', 'trace', 'modelhealth', 'baseurl', 'projectroot',
   'agents', 'agent', 'team', 'swarm', 'hive', 'panel', 'style', 'effort',
   'permission', 'plan', 'autoapprove', 'swarmautonomy', 'todo', 'history', 'codemap', 'undo',
   'usage', 'mcp', 'help', 'settings', 'new', 'exit',
@@ -672,6 +674,31 @@ async function handleCommand(line) {
       console.log(`${ANSI.dim}${PROVIDERS[p].label}: ${list.length} Key(s) -- ${parts.join(', ')}${ANSI.reset}`);
     }
     console.log('');
+    return;
+  }
+  if (cmd === 'modelhealth') {
+    if (arg === 'reset') {
+      resetHealth();
+      console.log(`${ANSI.dim}Gesamte Modell-Diagnose zurueckgesetzt -- alle Presets bekommen wieder eine neutrale Chance.${ANSI.reset}\n`);
+      return;
+    }
+    if (arg) {
+      if (!MODEL_PRESETS[arg]) {
+        console.log(`${ANSI.error}Unbekanntes Preset "${arg}". /models zeigt alle. /modelhealth reset (ohne Preset) setzt alle zurueck.${ANSI.reset}\n`);
+        return;
+      }
+      resetHealth(arg);
+      console.log(`${ANSI.dim}Diagnose fuer "${arg}" zurueckgesetzt.${ANSI.reset}\n`);
+      return;
+    }
+    const rows = listHealth(Object.keys(MODEL_PRESETS));
+    for (const r of rows) {
+      const status = r.permanent ? 'GESPERRT (Kontingent/Tageslimit)' : r.unhealthy ? `UNHEALTHY (${r.reason})` : r.calls ? 'gesund' : 'ungetestet';
+      console.log(
+        `${ANSI.dim}${r.key.padEnd(16)} Aufrufe:${String(r.calls).padEnd(4)} Fehler:${String(r.errors).padEnd(4)} Oe-Zeit:${(r.avgMs !== null ? r.avgMs + 'ms' : '-').padEnd(8)} ${status}${ANSI.reset}`
+      );
+    }
+    console.log(`\n${ANSI.dim}/modelhealth <preset> -- nur dieses zuruecksetzen. /modelhealth reset -- alle zuruecksetzen.${ANSI.reset}\n`);
     return;
   }
   if (cmd === 'hivedepth') {
