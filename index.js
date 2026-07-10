@@ -9,14 +9,15 @@ const { isExhausted: isKeyExhausted } = require('./keyPool');
 const { buildToolDefinitions: buildFileTools, WRITE_TOOLS, executeTool, undoLastWrite } = require('./tools');
 const { buildShellToolDefinitions, runCommand, readBackgroundOutput, checkDangerous, SHELL_WRITE_TOOLS, resetCwd } = require('./shell');
 const { AGENTS_DIR, loadAgentRoles, loadPipelineOrder } = require('./agents');
-const { runSwarm, runHive, runConsensusCheck } = require('./swarm');
+const { runSwarm, runHive, runConsensusCheck, recommendHiveDepth, effectiveHiveDepth } = require('./swarm');
 const { STYLES, styleSystemMessage } = require('./styles');
 const { EFFORT_LEVELS, effortMaxTokens, effortSystemMessage } = require('./effort');
 const { MCPClient, mcpToolDefinitions, isMcpTool, parseMcpTool } = require('./mcp');
 const { loadCustomCommand, listCustomCommands, renderCommand } = require('./commands');
 const { scanForInjection, appendAuditLog } = require('./permissions');
 const { fableSystemMessage } = require('./fable');
-const { PROJECT_MEMORY_FILENAME, loadProjectMemory, appendProjectMemory } = require('./memory');
+const { PROJECT_MEMORY_FILENAME, loadProjectMemory, appendProjectMemory, searchProjectMemory } = require('./memory');
+const trace = require('./trace');
 
 const AUDIT_LOG_PATH = path.join(path.dirname(CONFIG_PATH), 'audit.log');
 
@@ -177,12 +178,17 @@ function loadProjectInstructions(root) {
 // erfolgreichen Lauf geschrieben) zu EINER System-Nachricht -- fuer Einzel-Chat UND fuer
 // Swarm/Hive/Agent-Rollen (die bekommen sie als projectContext durchgereicht). Loest das
 // Problem, dass ein Modellwechsel nach einem Hive-Lauf vorher nichts vom Projekt wusste.
-function buildAgentContext(root) {
+// `task` optional: wird eine Aufgabenbeschreibung mitgegeben, werden per searchProjectMemory
+// (TF-IDF-artige Stichwortsuche, memory.js) nur die dazu passenden Eintraege ausgewaehlt statt
+// immer der GESAMTE Speicher bis zur Zeichen-Grenze -- relevanter UND kuerzer (weniger Tokens/
+// Kosten pro Zug) bei wachsender Projekt-Historie. Ohne task (z.B. beim allerersten Aufruf vor
+// der ersten Nutzernachricht) faellt es auf den vollen Speicher zurueck.
+function buildAgentContext(root, task = '') {
   const instructions = loadProjectInstructions(root);
-  const memory = loadProjectMemory(root);
+  const memory = task ? searchProjectMemory(root, task) : loadProjectMemory(root);
   const parts = [];
   if (instructions) parts.push(`Projekt-Instruktionen (${PROJECT_INSTRUCTIONS_FILENAME}):\n${instructions}`);
-  if (memory) parts.push(`Bisherige Agent-Aktivitaet in diesem Projekt (${PROJECT_MEMORY_FILENAME}):\n${memory}`);
+  if (memory) parts.push(`Relevante bisherige Agent-Aktivitaet in diesem Projekt (${PROJECT_MEMORY_FILENAME}):\n${memory}`);
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
 
@@ -237,6 +243,8 @@ const COMMAND_HELP = {
   addkey: { short: 'Weiteren API-Key fuer einen Anbieter hinzufuegen', long: '/addkey <openrouter|nim|ollama> <key>. Ist ein Key limitiert (429/Kontingent), wechselt sendChat automatisch zum naechsten in der Liste -- nuetzlich, wenn mehrere Projekte/CLI-Instanzen parallel laufen und ein Account an sein Limit stoesst. Cooldown-Status je Key: /keys.' },
   removekey: { short: 'Einen bestimmten API-Key wieder entfernen', long: '/removekey <provider> <nummer>. Nummer aus /keys uebernehmen.' },
   keys: { short: 'Alle gespeicherten Keys je Anbieter auflisten (maskiert)', long: 'Zeigt Anzahl + Cooldown-Status je Key (limitiert = wartet auf Erholung, siehe key-health.json).' },
+  hivedepth: { short: 'Verschachtelungstiefe von /hive einstellen', long: '/hivedepth <1-5> setzt sie fest, /hivedepth auto laesst sie automatisch anhand der Anzahl eingetragener API-Keys empfehlen (mehr Keys = weniger Rate-Limit-Risiko = mehr Tiefe vertretbar). Ohne Argument: aktueller Wert + Empfehlung. Achtung: Tiefe wirkt multiplikativ auf Kosten/Laufzeit.' },
+  trace: { short: 'Strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen', long: '/trace <lauf-id> zeigt alle Ereignisse (Modell-Wechsel, Key-Wechsel, Worker-Start/-Ende, Konsens-Stimmen) EINES Laufs in Reihenfolge. Ohne Argument: die letzten 30 Ereignisse ueber alle Laeufe. Lauf-ID wird nach jedem Swarm/Hive-Abschluss angezeigt.' },
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
   projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
@@ -264,7 +272,7 @@ const COMMAND_HELP = {
 };
 
 const BUILTIN_COMMANDS = [
-  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'baseurl', 'projectroot',
+  'models', 'model', 'recommend', 'fallback', 'provider', 'setkey', 'addkey', 'removekey', 'keys', 'hivedepth', 'trace', 'baseurl', 'projectroot',
   'agents', 'agent', 'team', 'swarm', 'hive', 'panel', 'style', 'effort',
   'permission', 'plan', 'autoapprove', 'swarmautonomy', 'todo', 'history', 'codemap', 'undo',
   'usage', 'mcp', 'help', 'settings', 'new', 'exit',
@@ -666,6 +674,44 @@ async function handleCommand(line) {
     console.log('');
     return;
   }
+  if (cmd === 'hivedepth') {
+    if (!arg) {
+      const rec = recommendHiveDepth(config);
+      const eff = effectiveHiveDepth(config);
+      console.log(
+        `${ANSI.dim}Aktive Hive-Tiefe: ${eff}${config.hiveDepth ? ' (manuell gesetzt)' : ` (automatisch empfohlen anhand ${Object.values(config.keys || {}).flat().filter((k) => k && k.trim()).length} eingetragener Key(s): ${rec})`}. Setzen mit /hivedepth <1-5> oder /hivedepth auto.${ANSI.reset}\n`
+      );
+      return;
+    }
+    if (arg === 'auto') {
+      config.hiveDepth = null;
+      saveConfig(config);
+      console.log(`${ANSI.dim}Hive-Tiefe wieder auf automatische Empfehlung gestellt (aktuell: ${recommendHiveDepth(config)}).${ANSI.reset}\n`);
+      return;
+    }
+    const n = Number(arg);
+    if (!Number.isInteger(n) || n < 1 || n > 5) {
+      console.log(`${ANSI.error}Nutzung: /hivedepth <1-5|auto>${ANSI.reset}\n`);
+      return;
+    }
+    config.hiveDepth = n;
+    saveConfig(config);
+    console.log(`${ANSI.dim}Hive-Tiefe manuell auf ${n} gesetzt (mehr Verschachtelung = multiplikativ mehr Kosten/Zeit pro Lauf).${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'trace') {
+    const events = trace.readTrace({ run: arg || null, limit: arg ? 200 : 30 });
+    if (!events.length) {
+      console.log(`${ANSI.dim}Keine Trace-Eintraege${arg ? ` fuer "${arg}"` : ''} gefunden.${ANSI.reset}\n`);
+      return;
+    }
+    for (const e of events) {
+      const { ts, run, event, ...detail } = e;
+      console.log(`${ANSI.dim}${ts.slice(11, 19)} [${run || '-'}] ${event} ${JSON.stringify(detail)}${ANSI.reset}`);
+    }
+    console.log('');
+    return;
+  }
   if (cmd === 'projectroot') {
     if (!arg) {
       console.log(`${ANSI.error}Nutzung: /projectroot <pfad>  (aktuell: ${config.projectRoot})${ANSI.reset}\n`);
@@ -730,7 +776,7 @@ async function handleCommand(line) {
         task,
         roles: [role],
         buildToolDefinitions,
-        projectContext: buildAgentContext(config.projectRoot),
+        projectContext: buildAgentContext(config.projectRoot, task),
         onAgentStart: (r) => {
           console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) ===${ANSI.reset}`);
           firstOutput = true;
@@ -1123,7 +1169,7 @@ async function runSwarmCommand(task, opts = {}) {
       task,
       roles: orderedRoles,
       buildToolDefinitions: buildTools,
-      projectContext: buildAgentContext(config.projectRoot),
+      projectContext: buildAgentContext(config.projectRoot, task),
       onAgentStart: (role) => {
         turnCount++;
         console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${role.label} (${role.model}) ===${ANSI.reset}`);
@@ -1143,7 +1189,7 @@ async function runSwarmCommand(task, opts = {}) {
       onEmptyTurn: (role) => { emptyTurnCount++; stopWaiting(true); printEmptyTurn(role); },
       onModelSwap: printModelSwap,
     });
-    console.log(`\n${ANSI.dim}Swarm fertig. (${turnCount} Zuege, ${retryCount} Retries, ${emptyTurnCount} leere Zuege)${ANSI.reset}\n`);
+    console.log(`\n${ANSI.dim}Swarm fertig. (${turnCount} Zuege, ${retryCount} Retries, ${emptyTurnCount} leere Zuege) -- Trace-ID: ${transcript.runId} (Details: /trace ${transcript.runId})${ANSI.reset}\n`);
     const newFiles = [...touchedFiles].filter((f) => !beforeFiles.has(f));
     const lastMsg = transcript[transcript.length - 1];
     appendProjectMemory(config.projectRoot, {
@@ -1194,7 +1240,7 @@ async function runHiveCommand(task, opts = {}) {
       coordinatorRole,
       workerRoles,
       buildToolDefinitions: buildTools,
-      projectContext: buildAgentContext(config.projectRoot),
+      projectContext: buildAgentContext(config.projectRoot, task),
       onAgentStart: (r) => {
         console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) ===${ANSI.reset}`);
         firstOutput = true;
@@ -1242,7 +1288,7 @@ async function runHiveCommand(task, opts = {}) {
       );
     } else {
       console.log(
-        `\n${ANSI.dim}Hive fertig. (${workerCount} Worker gestartet, ${workerErrorCount} Fehler, ${retryCount} Retries, ${emptyTurnCount} leere Zuege${coordinatorRetries ? `, ${coordinatorRetries} Coordinator-Neustarts` : ''})${ANSI.reset}\n`
+        `\n${ANSI.dim}Hive fertig. (${workerCount} Worker gestartet, ${workerErrorCount} Fehler, ${retryCount} Retries, ${emptyTurnCount} leere Zuege${coordinatorRetries ? `, ${coordinatorRetries} Coordinator-Neustarts` : ''}) -- Trace-ID: ${result.runId} (Details: /trace ${result.runId})${ANSI.reset}\n`
       );
       let newFiles = [...touchedFiles].filter((f) => !beforeFiles.has(f));
       let finalSummary = result.finalText || '(keine Textzusammenfassung)';
@@ -1255,6 +1301,7 @@ async function runHiveCommand(task, opts = {}) {
         buildToolDefinitions: buildTools,
         onFileToolCall: fileToolCall,
         onRetry: printRetry,
+        runId: result.runId,
       });
       for (const v of consensus.votes) {
         console.log(`${ANSI.dim}[Konsens] ${v.model}: ${v.verdict} -- ${shorten(v.reason, 200)}${ANSI.reset}`);
@@ -1272,7 +1319,8 @@ async function runHiveCommand(task, opts = {}) {
             coordinatorRole,
             workerRoles,
             buildToolDefinitions: buildTools,
-            projectContext: buildAgentContext(config.projectRoot),
+            projectContext: buildAgentContext(config.projectRoot, followupTask),
+            runId: result.runId,
             onAgentStart: (r) => console.log(`\n\n${ANSI.accent}${ANSI.bold}=== ${r.label} (${r.model}) [Nachbesserung] ===${ANSI.reset}`),
             onChunk: (delta) => process.stdout.write(delta),
             onWorkerStart: (role, t) => console.log(`\n${ANSI.accent}[Worker] ${role.label} startet (Nachbesserung): ${t}${ANSI.reset}`),
@@ -1351,7 +1399,8 @@ async function compactHistoryIfNeeded() {
 async function attemptChat(activeConfig) {
   const styleMsg = styleSystemMessage(activeConfig.style);
   const effortMsg = effortSystemMessage(activeConfig.effort);
-  const agentContext = buildAgentContext(activeConfig.projectRoot);
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+  const agentContext = buildAgentContext(activeConfig.projectRoot, lastUserMsg ? lastUserMsg.content : '');
   const projectMsg = agentContext ? { role: 'system', content: agentContext } : null;
   const extraMessages = [fableSystemMessage(), styleMsg, effortMsg, projectMsg].filter(Boolean);
   let assistantText = '';

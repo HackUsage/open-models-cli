@@ -5,6 +5,7 @@ const { styleSystemMessage } = require('./styles');
 const { fableSystemMessage } = require('./fable');
 const { recordAttempt, diagnose, pickReplacement } = require('./modelHealth');
 const { effortMaxTokens } = require('./effort');
+const trace = require('./trace');
 
 // Zeiteffizienz in Swarm/Hive: (1) weniger Retries pro Modell-Aufruf als im Einzel-Chat --
 // bei einem schlechten Modell lohnt sich hier nicht das volle Warten (1s/2s/4s Backoff, bis
@@ -41,11 +42,12 @@ function speakerTag(name, text) {
 // unzuverlaessig/langsam erwiesen hat, fuer DIESEN Zug automatisch auf ein anderes Preset
 // ausweichen, statt erneut eine lange Retry-Kette zu riskieren. onModelSwap benachrichtigt
 // den Aufrufer (index.js), damit der Nutzer sieht, dass/warum gewechselt wurde.
-function pickEffectiveModel(role, onModelSwap) {
+function pickEffectiveModel(role, onModelSwap, runId = null) {
   const diag = diagnose(role.model);
   if (!diag.unhealthy) return role.model;
   const replacement = pickReplacement(role.model, Object.keys(MODEL_PRESETS));
   if (replacement !== role.model) {
+    trace.logEvent(runId, 'model_swap', { role: role.name, from: role.model, to: replacement, reason: diag.reason });
     onModelSwap(role, role.model, replacement, diag.reason);
     return replacement;
   }
@@ -87,27 +89,49 @@ function buildDispatchTool(workerRoles) {
   };
 }
 
-// Ruflo-Vorbild (nested-coordinator): 2-stufige Hives -- ein Worker, den der Top-Coordinator
+// Ruflo-Vorbild (nested-coordinator): mehrstufige Hives -- ein Worker, den der Top-Coordinator
 // dispatcht (Tiefe 1), bekommt SELBST ebenfalls das dispatch_agents-Tool und kann seine
-// Teilaufgabe nochmal in kleinere Stuecke zerlegen. Tiefe 2 (von einem Tiefe-1-Worker
-// dispatchte Worker) bekommt das Tool NICHT MEHR -- reiner Leaf-Worker. Bewusst kleiner als
-// Ruflos Tiefe 5, um Kosten/Laufzeit nicht explodieren zu lassen. MAX_ASSIGNMENTS_PER_DISPATCH
-// gilt pro Dispatch-Aufruf auf JEDER Ebene (kein zusaetzlicher Multiplikator-Deckel noetig,
-// da jede Ebene schon einzeln gedeckelt ist).
-const MAX_HIVE_DEPTH = 2;
+// Teilaufgabe nochmal in kleinere Stuecke zerlegen, bis zur konfigurierten Tiefe. Bewusst mit
+// hartem Deckel bei Ruflos Tiefe 5, um Kosten/Laufzeit nicht explodieren zu lassen (Tiefe*
+// MAX_ASSIGNMENTS_PER_DISPATCH waechst multiplikativ). MAX_ASSIGNMENTS_PER_DISPATCH gilt pro
+// Dispatch-Aufruf auf JEDER Ebene (kein zusaetzlicher Multiplikator-Deckel noetig).
+//
+// Auf Nutzerwunsch konfigurierbar statt fix 2: mehr eingetragene API-Keys (siehe keyPool.js)
+// bedeuten weniger Rate-Limit-Risiko bei mehr gleichzeitigen Requests, also ist eine groessere
+// Tiefe (mehr parallele Verschachtelung = mehr gleichzeitige Calls) dann eher vertretbar. Ohne
+// explizite /hivedepth-Einstellung wird das automatisch aus der Key-Anzahl abgeleitet.
+const HIVE_DEPTH_CAP = 5;
+const HIVE_DEPTH_DEFAULT = 2;
+
+function recommendHiveDepth(config) {
+  const totalKeys = Object.values(config.keys || {}).reduce((sum, list) => {
+    const arr = Array.isArray(list) ? list : (list ? [list] : []);
+    return sum + arr.filter((k) => k && k.trim()).length;
+  }, 0);
+  if (totalKeys >= 6) return 4;
+  if (totalKeys >= 3) return 3;
+  return HIVE_DEPTH_DEFAULT;
+}
+
+function effectiveHiveDepth(config) {
+  const override = config.hiveDepth;
+  if (Number.isInteger(override) && override >= 1 && override <= HIVE_DEPTH_CAP) return override;
+  return Math.min(recommendHiveDepth(config), HIVE_DEPTH_CAP);
+}
 
 // Ein einzelner Worker-Knoten im (moeglicherweise verschachtelten) Hive-Baum. `depth` zaehlt
 // von 1 (direkt vom Top-Coordinator dispatcht) aufwaerts. `counter` ist ein ueber den GANZEN
 // Baum geteiltes { n } Objekt (per Referenz durchgereicht) -- liefert eindeutige Worker-IDs
 // (nicht nur pro Rollenname, siehe Kommentar bei workerSeq weiter unten) auch ueber mehrere
 // Verschachtelungsebenen hinweg.
-async function runWorkerNode({ config, role, task, depth, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap = () => {} }) {
+async function runWorkerNode({ config, role, task, depth, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap = () => {}, runId = null }) {
   const workerId = `${role.name}#${counter.n++}`;
   onWorkerStart(role, task, workerId);
-  const effectiveModel = pickEffectiveModel(role, onModelSwap);
+  trace.logEvent(runId, 'worker_start', { workerId, role: role.name, depth });
+  const effectiveModel = pickEffectiveModel(role, onModelSwap, runId);
   const workerConfig = { ...config, activeModel: effectiveModel };
   const baseTools = buildToolDefinitions(config.projectRoot, { readOnly: role.readOnly });
-  const canSubDispatch = depth < MAX_HIVE_DEPTH;
+  const canSubDispatch = depth < effectiveHiveDepth(config);
   const dispatchTool = canSubDispatch ? buildDispatchTool(workerRoles) : null;
   const tools = dispatchTool ? [dispatchTool, ...baseTools] : baseTools;
 
@@ -143,7 +167,7 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
             assignments.map((a) => {
               const subRole = workerRoles.find((r) => r.name === a.role);
               if (!subRole) return Promise.resolve({ role: a.role, label: a.role, error: `Rolle "${a.role}" nicht gefunden.` });
-              return runWorkerNode({ config, role: subRole, task: a.task, depth: depth + 1, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap });
+              return runWorkerNode({ config, role: subRole, task: a.task, depth: depth + 1, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap, runId });
             })
           );
           return subOutcomes
@@ -155,18 +179,22 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
       onRetry: (...a) => { workerRetries++; onRetry(...a); },
       maxRetries: SWARM_MAX_RETRIES,
       maxTokens: SWARM_MAX_TOKENS,
+      runId,
     });
     recordAttempt(effectiveModel, { retries: workerRetries, errored: false, durationMs: Date.now() - startMs });
     if (!text.trim() && !toolCallHappened) {
       const warning = 'LEER: Modell hat weder Text noch Tool-Aufrufe geliefert (moeglicher Modell-Aussetzer).';
+      trace.logEvent(runId, 'worker_empty', { workerId, role: role.name, model: effectiveModel });
       onWorkerDone(role, text, warning, workerId);
       return { role: role.name, label: role.label, error: warning };
     }
+    trace.logEvent(runId, 'worker_done', { workerId, role: role.name, model: effectiveModel, durationMs: Date.now() - startMs });
     onWorkerDone(role, text, null, workerId);
     return { role: role.name, label: role.label, text };
   } catch (err) {
     recordAttempt(effectiveModel, { retries: workerRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
     const message = err.message || String(err);
+    trace.logEvent(runId, 'worker_error', { workerId, role: role.name, model: effectiveModel, error: message });
     onWorkerDone(role, '', message, workerId);
     return { role: role.name, label: role.label, error: message };
   }
@@ -175,7 +203,7 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
 // Coordinator-gefuehrter Schwarm (ruflo-swarm:coordinator-Vorbild): EIN Coordinator-Modell
 // zerlegt die Aufgabe und dispatcht per Tool-Call an beliebig viele Worker-Rollen PARALLEL
 // (Promise.all -- echte gleichzeitige HTTP-Requests, kein sequenzielles Abarbeiten). Jeder
-// dispatchte Worker kann seinerseits nochmal dispatchen (siehe runWorkerNode/MAX_HIVE_DEPTH).
+// dispatchte Worker kann seinerseits nochmal dispatchen (siehe runWorkerNode/effectiveHiveDepth).
 // ponytail: Bug, den ein echter Lauf aufgedeckt hat -- coordinatorToolCallHappened blieb
 // fuer die GESAMTE (mehrstufige) Coordinator-Unterhaltung auf true, sobald IRGENDEIN Tool-
 // Aufruf passiert war (z.B. ein exploratives list_directory ganz am Anfang). Als danach der
@@ -187,7 +215,8 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
 // stillschweigend mit 0 Workern abzuschliessen.
 const MAX_COORDINATOR_ATTEMPTS = 2;
 
-async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {}, onCoordinatorRetry = () => {}, onModelSwap = () => {}, projectContext = null }) {
+async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDefinitions, onAgentStart, onChunk, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, onEmptyTurn = () => {}, onCoordinatorRetry = () => {}, onModelSwap = () => {}, projectContext = null, runId = trace.newRunId() }) {
+  trace.logEvent(runId, 'hive_start', { task: task.slice(0, 300), maxDepth: effectiveHiveDepth(config) });
   const dispatchTool = buildDispatchTool(workerRoles);
   // Coordinator bekommt volle Datei-Tools (er delegiert primaer, kann aber selbst nachschauen).
   const fileTools = buildToolDefinitions(config.projectRoot);
@@ -208,7 +237,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
   for (let attempt = 1; attempt <= MAX_COORDINATOR_ATTEMPTS && !dispatchHappened; attempt++) {
     onAgentStart(coordinatorRole);
 
-    const effectiveModel = pickEffectiveModel(coordinatorRole, onModelSwap);
+    const effectiveModel = pickEffectiveModel(coordinatorRole, onModelSwap, runId);
     const coordinatorConfig = { ...config, activeModel: effectiveModel };
     const coordinatorMessages = [
       { role: 'system', content: coordinatorRole.systemPrompt },
@@ -250,12 +279,13 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
             return 'FEHLER: keine gueltigen assignments uebergeben.';
           }
           dispatchHappened = true;
+          trace.logEvent(runId, 'coordinator_dispatch', { assignments: assignments.map((a) => a.role) });
 
           const outcomes = await Promise.all(
             assignments.map((a) => {
               const role = workerRoles.find((r) => r.name === a.role);
               if (!role) return Promise.resolve({ role: a.role, label: a.role, error: `Rolle "${a.role}" nicht gefunden.` });
-              return runWorkerNode({ config, role, task: a.task, depth: 1, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap });
+              return runWorkerNode({ config, role, task: a.task, depth: 1, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap, runId });
             })
           );
 
@@ -265,6 +295,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
         },
         maxRetries: SWARM_MAX_RETRIES,
         maxTokens: SWARM_MAX_TOKENS,
+        runId,
       });
       recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: false, durationMs: Date.now() - startMs });
     } catch (err) {
@@ -280,6 +311,8 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
   }
 
   result.dispatchHappened = dispatchHappened;
+  result.runId = runId;
+  trace.logEvent(runId, 'hive_done', { dispatchHappened });
   return result;
 }
 
@@ -297,7 +330,8 @@ function maxTotalTurns(roleCount) {
 // tatsaechlich einen weiteren Zug, statt dass die Nachricht ungelesen verpufft).
 // buildToolDefinitions/onFileToolCall kommen vom Aufrufer (index.js), damit swarm.js nichts
 // ueber Pfad-Sandboxing oder die Bestaetigungs-UI wissen muss.
-async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStart, onChunk, onNotice, onFileToolCall, onRetry, onEmptyTurn = () => {}, onModelSwap = () => {}, projectContext = null }) {
+async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStart, onChunk, onNotice, onFileToolCall, onRetry, onEmptyTurn = () => {}, onModelSwap = () => {}, projectContext = null, runId = trace.newRunId() }) {
+  trace.logEvent(runId, 'swarm_start', { task: task.slice(0, 300), roles: roles.map((r) => r.name) });
   const transcript = [{ role: 'user', content: `Team-Aufgabe: ${task}` }];
   const mailbox = {};
   const turnQueue = [...roles];
@@ -323,9 +357,10 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
       { role: 'user', content: `Du bist jetzt am Zug (Rolle: ${role.label}). Nutze die Datei-Tools falls fuer deine Rolle noetig.` },
     ];
 
-    const effectiveModel = pickEffectiveModel(role, onModelSwap);
+    const effectiveModel = pickEffectiveModel(role, onModelSwap, runId);
     const roleConfig = { ...config, activeModel: effectiveModel };
     const tools = [...buildToolDefinitions(config.projectRoot, { readOnly: role.readOnly }), SEND_MESSAGE_TOOL];
+    trace.logEvent(runId, 'turn_start', { role: role.name, model: effectiveModel });
 
     let finalText = '';
     let toolCallHappened = false;
@@ -361,17 +396,21 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
         },
         maxRetries: SWARM_MAX_RETRIES,
         maxTokens: SWARM_MAX_TOKENS,
+        runId,
       });
       recordAttempt(effectiveModel, { retries: roleRetries, errored: false, durationMs: Date.now() - startMs });
+      trace.logEvent(runId, 'turn_done', { role: role.name, model: effectiveModel, durationMs: Date.now() - startMs });
     } catch (err) {
       // Nicht den ganzen Schwarm abbrechen -- als leerer Zug behandeln, Diagnose merkt sich
       // den Fehlschlag (fuehrt bei Wiederholung zum automatischen Modell-Wechsel).
       recordAttempt(effectiveModel, { retries: roleRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
+      trace.logEvent(runId, 'turn_error', { role: role.name, model: effectiveModel, error: err.message || String(err) });
       finalText = '';
       toolCallHappened = false;
     }
 
     if (!finalText.trim() && !toolCallHappened) {
+      trace.logEvent(runId, 'empty_turn', { role: role.name, model: effectiveModel });
       onEmptyTurn(role);
     }
 
@@ -387,6 +426,8 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
     onNotice(`Zug-Limit (${cap}) erreicht -- Schwarm beendet, obwohl noch Nachrichten offen waren.`);
   }
 
+  trace.logEvent(runId, 'swarm_done', { turnsRun });
+  transcript.runId = runId; // Arrays sind Objekte -- zusaetzliches Feld stoert Index/length/Iteration nicht.
   return transcript;
 }
 
@@ -397,7 +438,7 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
 // Nur Lese-Tools (buildToolDefinitions mit readOnly:true) -- ein Richter darf nichts aendern.
 const CONSENSUS_JUDGE_MODELS = ['deepseek-v4', 'qwen-397b', 'kimi-k2.6'];
 
-async function runConsensusCheck({ config, task, files, buildToolDefinitions, onFileToolCall, onRetry }) {
+async function runConsensusCheck({ config, task, files, buildToolDefinitions, onFileToolCall, onRetry, runId = null }) {
   const filesList = files.length ? files.join(', ') : '(keine Dateien erkannt)';
   const prompt =
     `Aufgabe war: ${task}\n\nFolgende Dateien wurden in diesem Lauf veraendert: ${filesList}\n\n` +
@@ -419,12 +460,14 @@ async function runConsensusCheck({ config, task, files, buildToolDefinitions, on
           onRetry,
           maxRetries: SWARM_MAX_RETRIES,
           maxTokens: SWARM_MAX_TOKENS,
+          runId,
         });
       } catch (err) {
         text = `NACHBESSERUNG\n(Fehler beim Bewerten: ${err.message || err})`;
       }
       const firstLine = (text.trim().split('\n')[0] || '').toUpperCase();
       const verdict = firstLine.includes('FERTIG') && !firstLine.includes('NACHBESSER') ? 'FERTIG' : 'NACHBESSERUNG';
+      trace.logEvent(runId, 'consensus_vote', { model: modelKey, verdict });
       return { model: modelKey, verdict, reason: text.trim() || '(keine Begruendung geliefert)' };
     })
   );
@@ -433,4 +476,4 @@ async function runConsensusCheck({ config, task, files, buildToolDefinitions, on
   return { approved: approvals >= 2, votes };
 }
 
-module.exports = { runSwarm, runHive, runConsensusCheck, SEND_MESSAGE_TOOL };
+module.exports = { runSwarm, runHive, runConsensusCheck, SEND_MESSAGE_TOOL, recommendHiveDepth, effectiveHiveDepth };

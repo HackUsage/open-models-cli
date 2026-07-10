@@ -109,11 +109,13 @@ nicht persistiert) Retries/Fehler/Antwortzeit ueber die Laufzeit des Prozesses. 
 Aufruf eines Modells wird geurteilt: >=50% Fehlerquote, >=1.5 Retries im Schnitt pro Aufruf,
 oder >=45s Antwortzeit im Schnitt gilt als unzuverlaessig/langsam. Betrifft das die naechste
 Rolle, die dieses Modell nutzen wuerde (Einzel-Agent, Swarm-Rolle, Hive-Coordinator/Worker auf
-jeder Verschachtelungstiefe), wird automatisch auf ein anderes Preset ausgewichen (bevorzugt
-ein bereits getestetes, gesundes Modell; sonst ein hart codierter Fallback-Pool) -- sichtbar
-per `[Modell-Wechsel]`-Hinweis. Zusaetzlich werfen einzelne Coordinator-/Rollen-Fehlschlaege
-jetzt nicht mehr den GESAMTEN Swarm/Hive-Lauf um, sondern werden wie ein leerer Zug behandelt
-und fliessen in die Diagnose ein.
+jeder Verschachtelungstiefe), wird automatisch auf ein anderes Preset ausgewichen -- bevorzugt
+ein bereits getestetes, gesundes Modell (schnellstes zuerst), sonst ein noch nie getestetes
+(unbekannt gilt als besser als bekannt kaputt), und nur wenn WIRKLICH alle Presets aktuell
+unhealthy sind, ein normierter Score aus Fehlerquote/Retries/Latenz unter Meidung permanent
+gesperrter (Kontingent/Tageslimit) Modelle -- sichtbar per `[Modell-Wechsel]`-Hinweis. Zusaetzlich
+werfen einzelne Coordinator-/Rollen-Fehlschlaege jetzt nicht mehr den GESAMTEN Swarm/Hive-Lauf
+um, sondern werden wie ein leerer Zug behandelt und fliessen in die Diagnose ein.
 
 ## Mehrere API-Keys pro Anbieter (keyPool.js)
 
@@ -130,6 +132,32 @@ probiert. Zustand liegt in `key-health.json` (Key nur als Hash, nie im Klartext)
 `model-health.json` -- bei jedem Lesen/Schreiben frisch von der Platte gemergt, damit mehrere
 gleichzeitig laufende CLI-Instanzen sich denselben Key-Pool teilen, ohne sich gegenseitig zu
 ueberschreiben.
+
+## Tracing, semantische Projekt-Suche, konfigurierbare Hive-Tiefe (3. Ruflo-Runde)
+
+Auf Nutzerwunsch nach einem konkreten Bug-Report (ein Modell wurde durch ein Sekunden zuvor
+selbst als unhealthy diagnostiziertes ersetzt -- siehe modelHealth.js-Fix oben) und dem
+allgemeinen Wunsch nach mehr Ruflo-Anleihen:
+
+**Observability (trace.js):** jeder Swarm/Hive-Lauf bekommt eine Lauf-ID, unter der Modell-
+Wechsel, Key-Wechsel, Worker-Start/-Ende/-Fehler, Coordinator-Dispatch und Konsens-Stimmen
+strukturiert in `trace.jsonl` protokolliert werden (JSON Lines, cross-instance, rotiert ab 2MB).
+Nach jedem Swarm/Hive-Abschluss wird die Lauf-ID angezeigt, `/trace <lauf-id>` zeigt die
+komplette Ereigniskette dieses Laufs, `/trace` ohne Argument die letzten 30 Ereignisse global.
+
+**Semantische Projekt-Suche (memory.js):** `searchProjectMemory` ersetzt bei Swarm/Hive/Einzel-
+Chat-Aufrufen mit bekannter Aufgabe den kompletten `AGENTS_MEMORY.md`-Dump durch die Top-5 dazu
+passenden Eintraege (TF-IDF-artiges Scoring, reines JS, kein Embedding-Modell/API-Call noetig --
+Ruflo-Vorbild AgentDB/RuVector, hier ohne echte Vektoren nachgebaut, um keine zusaetzlichen
+Kosten pro Suche zu verursachen). Relevanter Kontext bei wachsender Historie UND kuerzere
+Prompts (weniger Tokens pro Zug).
+
+**Konfigurierbare Hive-Tiefe:** `/hivedepth <1-5>` setzt sie fest, `/hivedepth auto` (Standard)
+leitet sie aus der Anzahl eingetragener API-Keys ab (`swarm.js:recommendHiveDepth`) -- mehr Keys
+bedeuten weniger Rate-Limit-Risiko bei mehr gleichzeitigen Requests, also ist mehr Tiefe eher
+vertretbar: 1-2 Keys -> 2 (bisheriger fester Wert), 3-5 Keys -> 3, 6+ Keys -> 4. Hart gedeckelt
+bei 5 (Ruflos eigenes Maximum) -- Tiefe wirkt multiplikativ auf Kosten/Laufzeit, `/hivedepth`
+ohne Argument zeigt aktuellen Wert + Begruendung.
 
 ## Fable-Layer, Gedaechtnis, Nested-Hives, Konsens, Loops (Phasen A-E, 2. Runde)
 
@@ -249,6 +277,8 @@ kostenpflichtige).
 - `/addkey <openrouter|nim|ollama> <key>` -- weiteren Key hinzufuegen (mehrere Accounts, Auto-Wechsel bei Limit)
 - `/removekey <provider> <nummer>` -- Key wieder entfernen (Nummer aus `/keys`)
 - `/keys` -- alle Keys je Anbieter auflisten (Anzahl + Cooldown-Status)
+- `/hivedepth <1-5|auto>` -- Verschachtelungstiefe von `/hive` einstellen oder automatisch empfehlen lassen
+- `/trace [lauf-id]` -- strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen
 - `/baseurl <url>` -- eigene/custom Base-URL setzen (aktiviert Anbieter "custom")
 - `/settings` -- aktuelle Konfiguration anzeigen
 - `/agents` -- geladene Agent-Rollen anzeigen

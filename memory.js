@@ -53,4 +53,53 @@ function appendProjectMemory(root, entry) {
   }
 }
 
-module.exports = { PROJECT_MEMORY_FILENAME, loadProjectMemory, appendProjectMemory };
+function parseEntries(root) {
+  const raw = loadProjectMemory(root);
+  if (!raw) return [];
+  return raw.split(ENTRY_SEPARATOR).map((s) => s.trim()).filter(Boolean);
+}
+
+function tokenize(text) {
+  return (text || '').toLowerCase().match(/[a-z0-9äöüß]{3,}/g) || [];
+}
+
+// Ruflo-Vorbild (agentdb/ruvector: HNSW-Vektorsuche), hier ohne echte Embeddings nachgebaut --
+// ein Embedding-Call pro Suche waere ein zusaetzlicher, kostenpflichtiger API-Aufruf VOR jedem
+// eigentlichen Agent-Zug, was dem Kosten-/Geschwindigkeitsziel dieser Session widerspricht.
+// Klassisches TF-IDF-Scoring (reines JS, keine Abhaengigkeit, keine Netzwerk-Kosten) reicht, um
+// bei wachsender Projekt-Historie nur die paar Eintraege in den Kontext zu geben, die zur
+// AKTUELLEN Aufgabe passen -- statt bisher immer den kompletten Speicher bis zur Zeichen-Grenze.
+function searchProjectMemory(root, queryText, topN = 5) {
+  const entries = parseEntries(root);
+  if (!entries.length) return null;
+  const queryTokens = tokenize(queryText);
+  if (!queryTokens.length) return entries.slice(-topN).join(ENTRY_SEPARATOR);
+
+  const entryTokens = entries.map(tokenize);
+  const df = new Map();
+  for (const tokens of entryTokens) {
+    for (const t of new Set(tokens)) df.set(t, (df.get(t) || 0) + 1);
+  }
+  const N = entries.length;
+  const idf = (t) => Math.log((N + 1) / ((df.get(t) || 0) + 1)) + 1;
+
+  const scored = entries.map((entry, i) => {
+    const tf = new Map();
+    for (const t of entryTokens[i]) tf.set(t, (tf.get(t) || 0) + 1);
+    let score = 0;
+    for (const qt of queryTokens) {
+      if (tf.has(qt)) score += tf.get(qt) * idf(qt);
+    }
+    return { entry, score, index: i };
+  });
+
+  const top = scored
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || b.index - a.index)
+    .slice(0, topN);
+  if (!top.length) return entries.slice(-topN).join(ENTRY_SEPARATOR); // keine Ueberschneidung -> neuste als Fallback
+  top.sort((a, b) => a.index - b.index); // chronologisch fuer die Ausgabe
+  return top.map((s) => s.entry).join(ENTRY_SEPARATOR);
+}
+
+module.exports = { PROJECT_MEMORY_FILENAME, loadProjectMemory, appendProjectMemory, searchProjectMemory };

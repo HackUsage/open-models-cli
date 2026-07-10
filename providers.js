@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { getActiveKey, reportKeyFailure } = require('./keyPool');
+const trace = require('./trace');
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude-nemotron-cli');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -56,6 +57,9 @@ const DEFAULT_CONFIG = {
   planMode: false,
   autoApprove: false,
   swarmAutonomy: true,
+  // null = automatisch empfohlen anhand der Anzahl eingetragener API-Keys (siehe
+  // swarm.js:recommendHiveDepth) -- explizit auf 1-5 setzbar per /hivedepth.
+  hiveDepth: null,
 };
 
 function loadConfig() {
@@ -254,7 +258,7 @@ function mergeLeadingSystemMessages(messages) {
   return [{ role: 'system', content: systemParts.join('\n\n') }, ...rest];
 }
 
-async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry = () => {}, maxTokens = 8192, maxRetries = MAX_RETRIES }) {
+async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry = () => {}, maxTokens = 8192, maxRetries = MAX_RETRIES, runId = null }) {
   let target = resolveTarget(config);
   if (!target.baseUrl) {
     throw new Error(`Kein Base-URL fuer Anbieter "${target.provider}" gesetzt (/baseurl <url>).`);
@@ -304,6 +308,7 @@ async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry 
           reportKeyFailure(target.provider, target.apiKey, err.message);
           const next = resolveTarget(config);
           if (next.apiKey && next.apiKey !== target.apiKey) {
+            trace.logEvent(runId, 'key_swap', { provider: target.provider, status: err.status, reason: err.message });
             onRetry(new Error(`Key limitiert (${target.providerLabel}) -- wechsle zu naechstem Key.`), attempt + 1, maxRetries, 0);
             target = next;
             continue;
