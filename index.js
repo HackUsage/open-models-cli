@@ -1284,7 +1284,7 @@ async function runHiveCommand(task, opts = {}) {
     workerWaiters.clear();
     if (!result.dispatchHappened) {
       console.log(
-        `\n${ANSI.error}[Fehlschlag] Coordinator hat trotz ${coordinatorRetries + 1} Versuch(en) keinen einzigen Worker gestartet (haeufige Ursache: wiederholte Server-Ueberlastung des Coordinator-Modells "${coordinatorRole.model}"). Aufgabe erneut per /hive versuchen oder /model fuer die Coordinator-Rolle wechseln.${ANSI.reset}\n`
+        `\n${ANSI.error}[Fehlschlag] Coordinator hat trotz ${coordinatorRetries + 1} Versuch(en) keinen einzigen Worker gestartet (zuletzt versucht mit "${result.lastModel || coordinatorRole.model}" -- haeufige Ursache: wiederholte Server-Ueberlastung oder leere Antworten). Aufgabe erneut per /hive versuchen oder /model fuer die Coordinator-Rolle wechseln.${ANSI.reset}\n`
       );
     } else {
       console.log(

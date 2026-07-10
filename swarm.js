@@ -126,9 +126,11 @@ function effectiveHiveDepth(config) {
 // Verschachtelungsebenen hinweg.
 async function runWorkerNode({ config, role, task, depth, workerRoles, buildToolDefinitions, onWorkerStart, onWorkerDone, onFileToolCall, onRetry, projectContext, counter, onModelSwap = () => {}, runId = null }) {
   const workerId = `${role.name}#${counter.n++}`;
-  onWorkerStart(role, task, workerId);
-  trace.logEvent(runId, 'worker_start', { workerId, role: role.name, depth });
+  // pickEffectiveModel VOR onWorkerStart, damit die Anzeige das TATSAECHLICH verwendete
+  // (evtl. per Selbstdiagnose ersetzte) Modell zeigt statt immer role.model.
   const effectiveModel = pickEffectiveModel(role, onModelSwap, runId);
+  onWorkerStart({ ...role, model: effectiveModel }, task, workerId);
+  trace.logEvent(runId, 'worker_start', { workerId, role: role.name, depth, model: effectiveModel });
   const workerConfig = { ...config, activeModel: effectiveModel };
   const baseTools = buildToolDefinitions(config.projectRoot, { readOnly: role.readOnly });
   const canSubDispatch = depth < effectiveHiveDepth(config);
@@ -181,8 +183,17 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
       maxTokens: SWARM_MAX_TOKENS,
       runId,
     });
-    recordAttempt(effectiveModel, { retries: workerRetries, errored: false, durationMs: Date.now() - startMs });
-    if (!text.trim() && !toolCallHappened) {
+    const isEmpty = !text.trim() && !toolCallHappened;
+    // Leere Antwort (HTTP 200, aber weder Text noch Tool-Aufruf) zaehlt jetzt als Fehler fuer
+    // die Selbstdiagnose -- sonst wird ein Modell, das zuverlaessig leer statt mit echtem
+    // Fehler antwortet, NIE als unhealthy erkannt und immer wieder als "Ersatz" gewaehlt.
+    recordAttempt(effectiveModel, {
+      retries: workerRetries,
+      errored: isEmpty,
+      durationMs: Date.now() - startMs,
+      errorMessage: isEmpty ? 'leere Antwort (kein Text, kein Tool-Aufruf)' : '',
+    });
+    if (isEmpty) {
       const warning = 'LEER: Modell hat weder Text noch Tool-Aufrufe geliefert (moeglicher Modell-Aussetzer).';
       trace.logEvent(runId, 'worker_empty', { workerId, role: role.name, model: effectiveModel });
       onWorkerDone(role, text, warning, workerId);
@@ -234,10 +245,16 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
   // Zaehler ueber beliebig viele Verschachtelungsebenen hinweg per Referenz weiterzaehlen kann.
   const counter = { n: 0 };
 
+  let lastEffectiveModel = coordinatorRole.model;
   for (let attempt = 1; attempt <= MAX_COORDINATOR_ATTEMPTS && !dispatchHappened; attempt++) {
-    onAgentStart(coordinatorRole);
-
+    // pickEffectiveModel VOR onAgentStart, damit die "=== Rolle (Modell) ==="-Kopfzeile das
+    // TATSAECHLICH verwendete (evtl. per Selbstdiagnose ersetzte) Modell zeigt -- vorher zeigte
+    // sie immer coordinatorRole.model, selbst wenn direkt danach ein [Modell-Wechsel] auf ein
+    // anderes Modell folgte (verwirrend: Kopfzeile und Wechsel-Hinweis widersprachen sich).
     const effectiveModel = pickEffectiveModel(coordinatorRole, onModelSwap, runId);
+    lastEffectiveModel = effectiveModel;
+    onAgentStart({ ...coordinatorRole, model: effectiveModel });
+
     const coordinatorConfig = { ...config, activeModel: effectiveModel };
     const coordinatorMessages = [
       { role: 'system', content: coordinatorRole.systemPrompt },
@@ -297,21 +314,35 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
         maxTokens: SWARM_MAX_TOKENS,
         runId,
       });
-      recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: false, durationMs: Date.now() - startMs });
+      // ponytail: Bug, den dieser genaue Log-Ausschnitt aufgedeckt hat -- eine leere Antwort
+      // (kein Text, kein Tool-Aufruf, aber sendChat wirft KEINEN Fehler -- HTTP 200 mit leerem
+      // Content) wurde bisher als "errored: false" gewertet. Ein Modell, das zuverlaessig leer
+      // statt mit einem echten Fehler antwortet, wurde dadurch NIE als unhealthy diagnostiziert
+      // (0 Fehler in den Stats) und immer wieder als "Ersatz" gewaehlt -- genau das ist hier
+      // passiert: kimi-k2.6 wurde als Ersatz fuer das langsame deepseek-v4 gewaehlt, lieferte
+      // zweimal in Folge nichts, wurde aber trotzdem nicht als kaputt erkannt. Fix: leere
+      // Antworten zaehlen jetzt als Fehler fuer die Selbstdiagnose (nicht fuer isRetryable in
+      // providers.js -- das bleibt ein reines Diagnose-Signal fuer die NAECHSTE Modellwahl).
+      const isEmpty = !result.finalText.trim() && !coordinatorToolCallHappened;
+      recordAttempt(effectiveModel, {
+        retries: coordinatorRetries,
+        errored: isEmpty,
+        durationMs: Date.now() - startMs,
+        errorMessage: isEmpty ? 'leere Antwort (kein Text, kein Tool-Aufruf)' : '',
+      });
+      if (isEmpty) onEmptyTurn(coordinatorRole);
     } catch (err) {
       // Nicht die ganze Hive abbrechen -- als leerer Zug behandeln (loest im naechsten
       // Versuch automatisch einen Modell-Wechsel aus, falls das Muster sich wiederholt).
       recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
       result = { finalText: '', usage: null, provider: '', model: effectiveModel };
-    }
-
-    if (!result.finalText.trim() && !coordinatorToolCallHappened) {
       onEmptyTurn(coordinatorRole);
     }
   }
 
   result.dispatchHappened = dispatchHappened;
   result.runId = runId;
+  result.lastModel = lastEffectiveModel;
   trace.logEvent(runId, 'hive_done', { dispatchHappened });
   return result;
 }
@@ -341,7 +372,10 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
   while (turnQueue.length && turnsRun < cap) {
     const role = turnQueue.shift();
     turnsRun++;
-    onAgentStart(role);
+    // pickEffectiveModel VOR onAgentStart, damit die Anzeige das TATSAECHLICH verwendete
+    // (evtl. per Selbstdiagnose ersetzte) Modell zeigt statt immer role.model.
+    const effectiveModel = pickEffectiveModel(role, onModelSwap, runId);
+    onAgentStart({ ...role, model: effectiveModel });
 
     const pending = mailbox[role.name] || [];
     mailbox[role.name] = [];
@@ -357,7 +391,6 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
       { role: 'user', content: `Du bist jetzt am Zug (Rolle: ${role.label}). Nutze die Datei-Tools falls fuer deine Rolle noetig.` },
     ];
 
-    const effectiveModel = pickEffectiveModel(role, onModelSwap, runId);
     const roleConfig = { ...config, activeModel: effectiveModel };
     const tools = [...buildToolDefinitions(config.projectRoot, { readOnly: role.readOnly }), SEND_MESSAGE_TOOL];
     trace.logEvent(runId, 'turn_start', { role: role.name, model: effectiveModel });
@@ -398,7 +431,16 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
         maxTokens: SWARM_MAX_TOKENS,
         runId,
       });
-      recordAttempt(effectiveModel, { retries: roleRetries, errored: false, durationMs: Date.now() - startMs });
+      // Leere Antwort (kein Text, kein Tool-Aufruf, aber kein geworfener Fehler) zaehlt jetzt
+      // als Fehler fuer die Selbstdiagnose -- sonst wird ein Modell, das zuverlaessig leer
+      // statt mit echtem Fehler antwortet, nie als unhealthy erkannt.
+      const isEmptyTurn = !finalText.trim() && !toolCallHappened;
+      recordAttempt(effectiveModel, {
+        retries: roleRetries,
+        errored: isEmptyTurn,
+        durationMs: Date.now() - startMs,
+        errorMessage: isEmptyTurn ? 'leere Antwort (kein Text, kein Tool-Aufruf)' : '',
+      });
       trace.logEvent(runId, 'turn_done', { role: role.name, model: effectiveModel, durationMs: Date.now() - startMs });
     } catch (err) {
       // Nicht den ganzen Schwarm abbrechen -- als leerer Zug behandeln, Diagnose merkt sich
