@@ -165,7 +165,7 @@ async function runWorkerNode({ config, role, task, depth, workerRoles, buildTool
     onWorkerDone(role, text, null, workerId);
     return { role: role.name, label: role.label, text };
   } catch (err) {
-    recordAttempt(effectiveModel, { retries: workerRetries, errored: true, durationMs: Date.now() - startMs });
+    recordAttempt(effectiveModel, { retries: workerRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
     const message = err.message || String(err);
     onWorkerDone(role, '', message, workerId);
     return { role: role.name, label: role.label, error: message };
@@ -270,7 +270,7 @@ async function runHive({ config, task, coordinatorRole, workerRoles, buildToolDe
     } catch (err) {
       // Nicht die ganze Hive abbrechen -- als leerer Zug behandeln (loest im naechsten
       // Versuch automatisch einen Modell-Wechsel aus, falls das Muster sich wiederholt).
-      recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: true, durationMs: Date.now() - startMs });
+      recordAttempt(effectiveModel, { retries: coordinatorRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
       result = { finalText: '', usage: null, provider: '', model: effectiveModel };
     }
 
@@ -366,7 +366,7 @@ async function runSwarm({ config, task, roles, buildToolDefinitions, onAgentStar
     } catch (err) {
       // Nicht den ganzen Schwarm abbrechen -- als leerer Zug behandeln, Diagnose merkt sich
       // den Fehlschlag (fuehrt bei Wiederholung zum automatischen Modell-Wechsel).
-      recordAttempt(effectiveModel, { retries: roleRetries, errored: true, durationMs: Date.now() - startMs });
+      recordAttempt(effectiveModel, { retries: roleRetries, errored: true, durationMs: Date.now() - startMs, errorMessage: err.message || String(err) });
       finalText = '';
       toolCallHappened = false;
     }

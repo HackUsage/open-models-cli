@@ -49,25 +49,42 @@ function saveStats() {
 const stats = loadStats();
 
 function getStats(modelKey) {
-  if (!stats.has(modelKey)) stats.set(modelKey, { calls: 0, retries: 0, errors: 0, totalMs: 0, updatedAt: Date.now() });
+  if (!stats.has(modelKey)) stats.set(modelKey, { calls: 0, retries: 0, errors: 0, totalMs: 0, permanent: false, updatedAt: Date.now() });
   return stats.get(modelKey);
 }
 
-function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0 } = {}) {
+// Manche Fehler sind kein "voruebergehendes Ausreisser-Muster", sondern ein hartes,
+// deterministisches Limit (z.B. OpenRouters taegliches Freikontingent pro Modell) --
+// ein Retry oder ein zweiter Versuch aendert daran nichts. Solche Modelle SOFORT als
+// unhealthy markieren (nicht erst nach MIN_SAMPLES), sonst verschwendet jeder weitere
+// Loop-Durchlauf erneut einen kompletten Versuch auf ein bekannt totes Modell.
+const PERMANENT_ERROR_PATTERN = /rate limit|quota|per-day|per-month|resource ?exhausted/i;
+
+function isPermanentError(message) {
+  return PERMANENT_ERROR_PATTERN.test(message || '');
+}
+
+function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0, errorMessage = '' } = {}) {
   const s = getStats(modelKey);
   s.calls += 1;
   s.retries += retries;
   s.errors += errored ? 1 : 0;
   s.totalMs += durationMs;
+  if (errored && isPermanentError(errorMessage)) s.permanent = true;
   s.updatedAt = Date.now();
   saveStats();
 }
 
 // Erst ab MIN_SAMPLES Aufrufen urteilen -- ein einzelner Ausreisser (z.B. ein transienter
 // 503) soll nicht sofort zum Modell-Wechsel fuehren, ein wiederkehrendes Muster schon.
+// Ausnahme: s.permanent (siehe isPermanentError) gilt sofort, unabhaengig von MIN_SAMPLES.
 function diagnose(modelKey) {
   const s = stats.get(modelKey);
-  if (!s || s.calls < MIN_SAMPLES) return { unhealthy: false, reason: null };
+  if (!s) return { unhealthy: false, reason: null };
+  if (s.permanent) {
+    return { unhealthy: true, reason: 'Anbieter-Limit erreicht (z.B. Tageskontingent) -- vermutlich erst nach einiger Zeit wieder nutzbar' };
+  }
+  if (s.calls < MIN_SAMPLES) return { unhealthy: false, reason: null };
   const errorRate = s.errors / s.calls;
   const avgRetries = s.retries / s.calls;
   const avgMs = s.totalMs / s.calls;
@@ -87,13 +104,25 @@ function diagnose(modelKey) {
 // getestet und als gesund bekannt ist (z.B. gleich der allererste Zug schlaegt schon fehl).
 const FALLBACK_POOL = ['nemotron-super', 'gpt-oss-120b', 'kimi-k2.6', 'nemotron-nano9b'];
 
+// ponytail: Bug, den ein echter Langzeit-Lauf aufgedeckt hat -- der Fallback-Zweig schloss
+// nur currentModelKey aus, NICHT bereits bekannte unhealthy Kandidaten. Ein Modell, das
+// gerade erst als Ersatz diagnostiziert unhealthy wurde (z.B. Tageskontingent erschoepft),
+// wurde dadurch als "Fallback" trotzdem IMMER WIEDER gewaehlt -- Endlos-Pingpong zwischen
+// genau zwei kaputten Modellen statt Durchprobieren aller verfuegbaren Presets. Fix: sowohl
+// der getrackte Pfad als auch der Fallback-Pool schliessen JEDES bekannt unhealthy Modell
+// aus, nicht nur das urspruengliche. Bleibt am Ende nichts Gesundes uebrig (z.B. weil wirklich
+// alle Presets gerade limitiert sind), lieber IRGENDEIN anderes Modell probieren als stur
+// beim bekannt kaputten currentModelKey zu bleiben.
 function pickReplacement(currentModelKey, candidateKeys) {
+  const isUsable = (k) => k !== currentModelKey && !diagnose(k).unhealthy;
   const healthyTracked = candidateKeys
-    .filter((k) => k !== currentModelKey && stats.has(k) && !diagnose(k).unhealthy)
+    .filter((k) => isUsable(k) && stats.has(k))
     .sort((a, b) => stats.get(a).totalMs / stats.get(a).calls - stats.get(b).totalMs / stats.get(b).calls);
   if (healthyTracked.length) return healthyTracked[0];
-  const fallback = FALLBACK_POOL.find((k) => k !== currentModelKey);
-  return fallback || currentModelKey;
+  const fallback = FALLBACK_POOL.find(isUsable);
+  if (fallback) return fallback;
+  const anyOther = candidateKeys.find((k) => k !== currentModelKey);
+  return anyOther || currentModelKey;
 }
 
 module.exports = { recordAttempt, diagnose, pickReplacement };
