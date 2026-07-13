@@ -172,15 +172,41 @@ function pickReplacement(currentModelKey, candidateKeys, config = null) {
   const others = candidateKeys.filter((k) => k !== currentModelKey);
   if (!others.length) return currentModelKey;
   reloadFromDisk();
-  // Alle drei Diagnose-Dimensionen normiert auf ihre eigene Unhealthy-Schwelle summieren (nicht
-  // nur Fehlerquote allein) -- sonst wuerde z.B. ein Modell mit 0 Fehlern aber 300s Antwortzeit
-  // faelschlich als "bestes" gelten. permanent (Kontingent/Tageslimit) wird ganz gemieden, so
-  // lange noch ein anderer, nur transient schlechter Kandidat uebrig ist.
-  const score = (s) => (s.errors / s.calls) / UNHEALTHY_ERROR_RATE
-    + (s.retries / s.calls) / UNHEALTHY_RETRY_RATIO
-    + (s.totalMs / s.calls) / SLOW_MS_THRESHOLD;
   const withLiveKeyOthers = others.filter((k) => hasLiveKey(k, config));
   const scorePool = withLiveKeyOthers.length ? withLiveKeyOthers : others;
+
+  // Ein Modell, das SCHNELL aber falsch/leer antwortet, ist NIE besser als eines, das
+  // LANGSAM aber tatsaechlich korrekt antwortet -- echte Fehlerquote/Retry-Probleme muessen
+  // daher IMMER vor reinen Latenz-Problemen gemieden werden. Bug, den ein echter Lauf
+  // aufgedeckt hat: die alte kombinierte Score-Formel normierte Fehlerquote auf 0.5, Latenz
+  // aber auf ein FIXES 45s -- bei einem insgesamt langsamen Fleet (100s+ ueberall) dominierte
+  // der Latenz-Term jede Rechnung so stark, dass ein 100%-defektes, aber SCHNELL scheiterndes
+  // Modell (274ms bis zur leeren Antwort) besser abschnitt als ein 0%-Fehler-Modell mit 130s
+  // Antwortzeit -- der Coordinator landete dadurch garantiert immer wieder bei einem Modell,
+  // das nichts liefert. Fix: erst NUR unter Kandidaten OHNE echtes Fehlerquote/Retry-Problem
+  // nach der schnellsten suchen. Der volle kombinierte Score ist NUR noch der allerletzte
+  // Ausweg, wenn WIRKLICH jeder verbleibende Kandidat ein echtes Fehlerproblem hat.
+  const isErrorFree = (k) => {
+    const s = stats.get(k);
+    if (!s || !s.calls) return true; // ungetestet -- kein bekanntes Fehlerproblem
+    if (s.permanent) return false;
+    return (s.errors / s.calls) < UNHEALTHY_ERROR_RATE && (s.retries / s.calls) < UNHEALTHY_RETRY_RATIO;
+  };
+  const errorFreePool = scorePool.filter(isErrorFree);
+  if (errorFreePool.length) {
+    const tested = errorFreePool
+      .filter((k) => stats.has(k))
+      .sort((a, b) => stats.get(a).totalMs / stats.get(a).calls - stats.get(b).totalMs / stats.get(b).calls);
+    return tested[0] || errorFreePool[0];
+  }
+
+  // Wirklich ALLES hat ein echtes Fehlerproblem -- kombinierter Score (Latenz relativ zur
+  // Fleet-Schwelle normiert, nicht mehr fix 45s) als letzter Ausweg. permanent (Kontingent/
+  // Tageslimit) wird weiterhin gemieden, so lange noch ein anderer Kandidat uebrig ist.
+  const slowThreshold = effectiveSlowThreshold();
+  const score = (s) => (s.errors / s.calls) / UNHEALTHY_ERROR_RATE
+    + (s.retries / s.calls) / UNHEALTHY_RETRY_RATIO
+    + (s.totalMs / s.calls) / slowThreshold;
   let best = scorePool[0];
   let bestScore = Infinity;
   for (const k of scorePool) {
