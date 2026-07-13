@@ -120,8 +120,12 @@ Auf Nutzerwunsch: manche Modelle brauchen sehr lange oder werfen haeufig Fehler,
 Retries und viel verlorener Zeit fuehrt. `modelHealth.js` sammelt pro Modell-Preset
 Retries/Fehler/Antwortzeit -- persistiert in `model-health.json` (cross-instance, Eintraege
 verfallen nach 6h automatisch, `/modelhealth` zeigt/reset den Stand). Ab dem 2.
-Aufruf eines Modells wird geurteilt: >=50% Fehlerquote, >=1.5 Retries im Schnitt pro Aufruf,
-oder >=45s Antwortzeit im Schnitt gilt als unzuverlaessig/langsam. Betrifft das die naechste
+Aufruf eines Modells wird geurteilt: >=50% Fehlerquote oder >=1.5 Retries im Schnitt pro Aufruf
+gelten IMMER als unzuverlaessig. Die Langsam-Schwelle ist RELATIV (Auf Nutzerwunsch, nachdem
+bei insgesamt hoher Auslastung fast das gesamte Preset-Set als "unhealthy" markiert war, obwohl
+eines im Vergleich klar das beste war): `effectiveSlowThreshold()` in modelHealth.js nimmt den
+Median der Antwortzeit ueber alle aktuell getesteten Presets * 2.5 als Schwelle, mindestens
+aber 45s (SLOW_MS_THRESHOLD als Untergrenze fuer den Normalfall). Betrifft das die naechste
 Rolle, die dieses Modell nutzen wuerde (Einzel-Agent, Swarm-Rolle, Hive-Coordinator/Worker auf
 jeder Verschachtelungstiefe), wird automatisch auf ein anderes Preset ausgewichen -- bevorzugt
 ein bereits getestetes, gesundes Modell (schnellstes zuerst), sonst ein noch nie getestetes

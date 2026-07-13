@@ -15,7 +15,15 @@ const { isExhausted } = require('./keyPool');
 const MIN_SAMPLES = 2;
 const UNHEALTHY_ERROR_RATE = 0.5;
 const UNHEALTHY_RETRY_RATIO = 1.5;
+// Auf Nutzerwunsch: ein fixer Schwellwert ignoriert, dass ALLE Presets mal gleichzeitig
+// langsam sein koennen (z.B. hohe Auslastung bei kostenlosen Anbietern zu Stosszeiten) --
+// dann wuerde praktisch jedes Modell als "unhealthy" gelten, obwohl eines im Vergleich zu
+// den anderen trotzdem klar das bessere ist. SLOW_MS_THRESHOLD bleibt die UNTERGRENZE (im
+// Normalfall, wenn die meisten Modelle deutlich schneller sind, soll ein 45s+ Ausreisser
+// weiterhin auffallen) -- effectiveSlowThreshold() hebt die Schwelle nur an, wenn der
+// Fleet-Median selbst schon hoch liegt.
 const SLOW_MS_THRESHOLD = 45000;
+const SLOW_RELATIVE_MULTIPLIER = 2.5;
 
 const HEALTH_PATH = path.join(path.dirname(CONFIG_PATH), 'model-health.json');
 // Alte Diagnosedaten (z.B. von einem laengst behobenen Anbieter-Ausfall vor Tagen) sollen
@@ -79,6 +87,19 @@ function recordAttempt(modelKey, { retries = 0, errored = false, durationMs = 0,
   saveStats();
 }
 
+// Fleet-Median der Antwortzeit ueber alle aktuell getesteten (MIN_SAMPLES erreicht, nicht
+// permanent gesperrten) Presets -- Grundlage fuer die RELATIVE Langsam-Schwelle. Ohne genug
+// Vergleichsdaten (0-1 getestete Presets) bleibt es bei SLOW_MS_THRESHOLD als Fallback.
+function effectiveSlowThreshold() {
+  const avgTimes = [...stats.values()]
+    .filter((s) => s.calls >= MIN_SAMPLES && !s.permanent)
+    .map((s) => s.totalMs / s.calls)
+    .sort((a, b) => a - b);
+  if (!avgTimes.length) return SLOW_MS_THRESHOLD;
+  const median = avgTimes[Math.floor(avgTimes.length / 2)];
+  return Math.max(SLOW_MS_THRESHOLD, median * SLOW_RELATIVE_MULTIPLIER);
+}
+
 // Erst ab MIN_SAMPLES Aufrufen urteilen -- ein einzelner Ausreisser (z.B. ein transienter
 // 503) soll nicht sofort zum Modell-Wechsel fuehren, ein wiederkehrendes Muster schon.
 // Ausnahme: s.permanent (siehe isPermanentError) gilt sofort, unabhaengig von MIN_SAMPLES.
@@ -101,8 +122,9 @@ function diagnose(modelKey) {
   if (avgRetries >= UNHEALTHY_RETRY_RATIO) {
     return { unhealthy: true, reason: `im Schnitt ${avgRetries.toFixed(1)} Retries pro Aufruf` };
   }
-  if (avgMs >= SLOW_MS_THRESHOLD) {
-    return { unhealthy: true, reason: `im Schnitt ${Math.round(avgMs / 1000)}s Antwortzeit` };
+  const slowThreshold = effectiveSlowThreshold();
+  if (avgMs >= slowThreshold) {
+    return { unhealthy: true, reason: `im Schnitt ${Math.round(avgMs / 1000)}s Antwortzeit (>= ${Math.round(slowThreshold / 1000)}s Schwelle relativ zum Fleet-Median)` };
   }
   return { unhealthy: false, reason: null };
 }
