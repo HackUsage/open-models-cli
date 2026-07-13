@@ -291,6 +291,7 @@ async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry 
     let assistantText = '';
     let toolCalls = [];
 
+    let keySwapAttempts = 0;
     for (let attempt = 0; ; attempt++) {
       try {
         assistantText = '';
@@ -317,12 +318,21 @@ async function sendChat({ config, messages, tools, onChunk, onToolCall, onRetry 
       } catch (err) {
         // Key-Rotation VOR dem normalen Retry-Pfad: 401/403/429 auf DIESEM Key sind mit einem
         // Ersatz-Key sofort loesbar (kein Backoff noetig), waehrend derselbe Key erneut zu
-        // versuchen nur denselben Fehler reproduzieren wuerde.
+        // versuchen nur denselben Fehler reproduzieren wuerde. Bug, den ein echter Lauf
+        // aufgedeckt hat: "continue" ueberspringt den maxRetries-Check unten KOMPLETT -- ohne
+        // eigene Obergrenze lief das bei GLEICHZEITIG limitierten Keys (z.B. providerweiter
+        // 429, nicht nur ein einzelner Key) endlos weiter (reportKeyFailure verlaengert bei
+        // jedem Fehlschlag das Cooldown des gerade probierten Keys, getActiveKey greift dann
+        // zum naechst-baldigen -- ping-pong zwischen 2 Keys, jedesmal "wechsle zu naechstem
+        // Key" mit 0s Wartezeit, ohne je den regulaeren Retry-Pfad zu erreichen). Fix: pro
+        // sendChat-Aufruf hoechstens einmal pro eingetragenem Key rotieren, danach faellt es
+        // in den normalen Backoff-/maxRetries-Pfad (der wirft irgendwann echt).
         const isKeyError = err instanceof ModelError && (err.status === 429 || err.status === 401 || err.status === 403);
-        if (isKeyError && target.keyCount > 1) {
+        if (isKeyError && target.keyCount > 1 && keySwapAttempts < target.keyCount) {
           reportKeyFailure(target.provider, target.apiKey, err.message);
           const next = resolveTarget(config);
           if (next.apiKey && next.apiKey !== target.apiKey) {
+            keySwapAttempts++;
             trace.logEvent(runId, 'key_swap', { provider: target.provider, status: err.status, reason: err.message });
             onRetry(new Error(`Key limitiert (${target.providerLabel}) -- wechsle zu naechstem Key.`), attempt + 1, maxRetries, 0);
             target = next;
