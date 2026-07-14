@@ -4,7 +4,7 @@
 const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
-const { PROVIDERS, MODEL_PRESETS, loadConfig, saveConfig, sendChat, resolveTarget, CONFIG_PATH } = require('./providers');
+const { PROVIDERS, MODEL_PRESETS, loadConfig, saveConfig, sendChat, resolveTarget, CONFIG_PATH, DEFAULT_OLLAMA_BASE_URL } = require('./providers');
 const { isExhausted: isKeyExhausted } = require('./keyPool');
 const { listHealth, resetHealth, diagnose, pickReplacement, recordAttempt } = require('./modelHealth');
 const { buildToolDefinitions: buildFileTools, WRITE_TOOLS, executeTool, undoLastWrite, previewDiff } = require('./tools');
@@ -305,6 +305,7 @@ const COMMAND_HELP = {
   trace: { short: 'Strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen', long: '/trace <lauf-id> zeigt alle Ereignisse (Modell-Wechsel, Key-Wechsel, Worker-Start/-Ende, Konsens-Stimmen) EINES Laufs in Reihenfolge. Ohne Argument: die letzten 30 Ereignisse ueber alle Laeufe. Lauf-ID wird nach jedem Swarm/Hive-Abschluss angezeigt.' },
   modelhealth: { short: 'Diagnose-Status aller Modell-Presets anzeigen/zuruecksetzen', long: 'Ohne Argument: Aufrufe/Fehler/Antwortzeit/Status (gesund, unhealthy, gesperrt, ungetestet) je Preset -- beantwortet "warum wird nur zwischen 2 Modellen gewechselt" direkt statt zu raten. /modelhealth <preset> setzt nur eins zurueck, /modelhealth reset alle (statt bis zu 6h auf STALE_MS zu warten).' },
   baseurl: { short: 'Eigene OpenAI-kompatible Basis-URL setzen', long: 'Setzt gleichzeitig /provider custom -- fuer jeden OpenAI-kompatiblen Endpunkt, der kein eigenes Preset hat.' },
+  ollamahost: { short: 'Ollama-Adresse setzen (z.B. anderer Rechner im Netzwerk)', long: 'Standard ist localhost. Fuer Ollama auf einem anderen Rechner: /ollamahost http://<ip>:11434/v1 -- der andere Rechner muss Ollama mit OLLAMA_HOST=0.0.0.0 starten und Port 11434 freigeben. /ollamahost reset setzt zurueck.' },
   projectroot: { short: 'Projekt-Ordner fuer die Datei-/Shell-Tools wechseln', long: 'Wird automatisch angelegt, falls er noch nicht existiert. Default ist ~/nemotron-projects (portabel, kein hart codiertes Laufwerk).' },
   agents: { short: 'Verfuegbare Agent-Rollen auflisten', long: 'Zeigt alle Rollen aus agents/*.json mit Modell-Zuordnung.' },
   agent: { short: 'Genau EINE Rolle ad-hoc auf eine Aufgabe ansetzen', long: 'Anders als /swarm: keine feste Pipeline-Reihenfolge, nur die eine angegebene Rolle fuer genau einen Zug. Sinnvoll fuer kleine Einzelaufgaben, wo Planner->Coder->Reviewer ueberdimensioniert waere.' },
@@ -333,7 +334,7 @@ const COMMAND_HELP = {
 // Gruppiert statt einer flachen, historisch gewachsenen Liste -- /help zeigt die Gruppen-Titel
 // als Zwischenueberschriften, Tab-Vervollstaendigung nutzt weiterhin die flache Ableitung unten.
 const COMMAND_GROUPS = [
-  { title: 'Modelle & Anbieter', commands: ['models', 'model', 'recommend', 'fallback', 'provider', 'baseurl', 'modelhealth'] },
+  { title: 'Modelle & Anbieter', commands: ['models', 'model', 'recommend', 'fallback', 'provider', 'baseurl', 'ollamahost', 'modelhealth'] },
   { title: 'API-Keys (mehrere Accounts)', commands: ['setkey', 'addkey', 'removekey', 'keys'] },
   { title: 'Agenten & Teams', commands: ['agents', 'agent', 'swarm', 'hive', 'team', 'panel', 'hivedepth', 'trace'] },
   { title: 'Sicherheit & Berechtigungen', commands: ['permission', 'plan', 'autoapprove', 'swarmautonomy'] },
@@ -856,6 +857,31 @@ async function handleCommand(line) {
     config.activeProvider = 'custom';
     saveConfig(config);
     console.log(`${ANSI.dim}Custom Base-URL gesetzt und aktiviert: ${arg}${ANSI.reset}\n`);
+    return;
+  }
+  if (cmd === 'ollamahost') {
+    if (!arg) {
+      console.log(
+        `${ANSI.dim}Aktuell: ${config.ollamaBaseUrl || `${DEFAULT_OLLAMA_BASE_URL} (Standard, lokal)`}${ANSI.reset}\n` +
+          `${ANSI.dim}Nutzung: /ollamahost <url>  -- z.B. http://192.168.1.23:11434/v1 fuer Ollama auf einem anderen Rechner. ` +
+          `/ollamahost reset setzt zurueck auf lokal.${ANSI.reset}\n`
+      );
+      return;
+    }
+    if (arg === 'reset') {
+      config.ollamaBaseUrl = '';
+      saveConfig(config);
+      console.log(`${ANSI.dim}Ollama-Adresse zurueckgesetzt auf lokal (${DEFAULT_OLLAMA_BASE_URL}).${ANSI.reset}\n`);
+      return;
+    }
+    config.ollamaBaseUrl = arg;
+    saveConfig(config);
+    console.log(
+      `${ANSI.dim}Ollama-Adresse gesetzt: ${arg}${ANSI.reset}\n` +
+        `${ANSI.error}Wichtig: der ANDERE Rechner muss Ollama mit OLLAMA_HOST=0.0.0.0 gestartet haben ` +
+        `(Standard ist nur 127.0.0.1, von hier aus nicht erreichbar) und Port 11434 in der Firewall freigeben -- ` +
+        `sonst schlaegt jeder Aufruf mit einem Verbindungsfehler fehl.${ANSI.reset}\n`
+    );
     return;
   }
   if (cmd === 'agents') {

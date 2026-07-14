@@ -151,6 +151,42 @@ probiert. Zustand liegt in `key-health.json` (Key nur als Hash, nie im Klartext)
 gleichzeitig laufende CLI-Instanzen sich denselben Key-Pool teilen, ohne sich gegenseitig zu
 ueberschreiben.
 
+## Ollama auf einem anderen Rechner (z.B. Laptop im Netzwerk)
+
+Auf Nutzerwunsch: `ollama`-Adresse war fix auf `localhost` -- damit nur nutzbar, wenn Ollama
+auf DEMSELBEN Rechner laeuft wie dieses Tool. `/ollamahost <url>` setzt jetzt eine eigene
+Adresse (z.B. `http://192.168.1.23:11434/v1` fuer einen Laptop im selben Netzwerk),
+`/ollamahost reset` zurueck auf lokal, `/ollamahost` ohne Argument zeigt den aktuellen Stand.
+
+**Wichtig -- das muss auf dem ANDEREN Rechner (dem mit Ollama) passieren, dieses Tool kann es
+nicht uebernehmen:**
+1. Ollama mit `OLLAMA_HOST=0.0.0.0 ollama serve` starten (Standard ist NUR `127.0.0.1` --
+   von aussen unerreichbar, auch im selben WLAN).
+2. Port `11434` in der Firewall des anderen Rechners freigeben.
+3. Dessen LAN-IP (z.B. `192.168.1.23`, per `ipconfig`/`ifconfig` auf DEM Rechner
+   herausfinden) hier bei `/ollamahost` eintragen.
+
+Ohne Schritt 1+2 schlaegt jeder Aufruf mit einem Verbindungsfehler fehl -- reine
+Netzwerkkonfiguration ausserhalb dieses Tools, kein Bug hier.
+
+## Ollama auf einem anderen Rechner (z.B. Laptop im Netzwerk)
+
+Auf Nutzerwunsch: `ollama`-Adresse war fix auf `localhost` -- damit nur nutzbar, wenn Ollama
+auf DEMSELBEN Rechner laeuft wie dieses Tool. `/ollamahost <url>` setzt jetzt eine eigene
+Adresse (z.B. `http://192.168.1.23:11434/v1` fuer einen Laptop im selben Netzwerk),
+`/ollamahost reset` zurueck auf lokal, `/ollamahost` ohne Argument zeigt den aktuellen Stand.
+
+**Wichtig -- das muss auf dem ANDEREN Rechner (dem mit Ollama) passieren, dieses Tool kann es
+nicht uebernehmen:**
+1. Ollama mit `OLLAMA_HOST=0.0.0.0 ollama serve` starten (Standard ist NUR `127.0.0.1` --
+   von aussen unerreichbar, auch im selben WLAN).
+2. Port `11434` in der Firewall des anderen Rechners freigeben.
+3. Dessen LAN-IP (z.B. `192.168.1.23`, per `ipconfig`/`ifconfig` auf DEM Rechner
+   herausfinden) hier bei `/ollamahost` eintragen.
+
+Ohne Schritt 1+2 schlaegt jeder Aufruf mit einem Verbindungsfehler fehl -- reine
+Netzwerkkonfiguration ausserhalb dieses Tools, kein Bug hier.
+
 ## Selbstdiagnose auch im Einzel-Chat (Bugfix)
 
 Echter Bug-Report: deepseek-v4 (schon per `/modelhealth` als 50% Fehlerquote unhealthy markiert)
@@ -419,6 +455,7 @@ kostenpflichtige).
 - `/trace [lauf-id]` -- strukturiertes Ereignis-Log eines Swarm/Hive-Laufs ansehen
 - `/modelhealth [preset|reset]` -- Diagnose-Status aller Presets anzeigen, einzeln oder komplett zuruecksetzen
 - `/baseurl <url>` -- eigene/custom Base-URL setzen (aktiviert Anbieter "custom")
+- `/ollamahost <url|reset>` -- Ollama-Adresse setzen (z.B. anderer Rechner im Netzwerk statt localhost)
 - `/settings` -- aktuelle Konfiguration anzeigen
 - `/agents` -- geladene Agent-Rollen anzeigen
 - `/agent <rolle> <aufgabe>` -- eine einzelne Rolle direkt aufrufen (ohne volle Pipeline)

@@ -9,10 +9,18 @@ const trace = require('./trace');
 const CONFIG_DIR = path.join(os.homedir(), '.claude-nemotron-cli');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
+// Ollama-Standard-Adresse -- Auf Nutzerwunsch ueberschreibbar (config.ollamaBaseUrl, siehe
+// resolveTarget), damit ein Ollama-Server auf einem ANDEREN Rechner (z.B. Laptop im selben
+// Netzwerk) genutzt werden kann, nicht nur der lokale. Der andere Rechner muss dafuer Ollama
+// mit OLLAMA_HOST=0.0.0.0 starten (Standard ist nur 127.0.0.1, von aussen nicht erreichbar)
+// und Port 11434 in der Firewall freigeben -- reine Netzwerkkonfiguration, die dieses Tool
+// nicht uebernehmen kann.
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+
 const PROVIDERS = {
   openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
   nim: { label: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1' },
-  ollama: { label: 'Ollama (lokal)', baseUrl: 'http://localhost:11434/v1' },
+  ollama: { label: 'Ollama', baseUrl: DEFAULT_OLLAMA_BASE_URL },
   custom: { label: 'Custom', baseUrl: '' },
 };
 
@@ -43,6 +51,9 @@ const DEFAULT_CONFIG = {
   // sobald einer limitiert ist (siehe keyPool.js).
   keys: { openrouter: [], nim: [], ollama: ['ollama'] },
   customBaseUrl: '',
+  // Leer = lokaler Standard (DEFAULT_OLLAMA_BASE_URL). Gesetzt (per /ollamahost) = Ollama auf
+  // einem anderen Rechner im Netzwerk statt localhost.
+  ollamaBaseUrl: '',
   activeModel: 'nemotron-super',
   activeProvider: 'openrouter',
   // Portabler Default statt eines hart codierten Laufwerks (war 'E:\\' -- funktionierte nur
@@ -123,7 +134,11 @@ function resolveTarget(config) {
   const preset = MODEL_PRESETS[config.activeModel];
   const provider = preset ? preset.provider : config.activeProvider;
   const model = preset ? preset.model : config.activeModel;
-  const baseUrl = provider === 'custom' ? config.customBaseUrl : PROVIDERS[provider]?.baseUrl;
+  const baseUrl = provider === 'custom'
+    ? config.customBaseUrl
+    : provider === 'ollama' && config.ollamaBaseUrl
+      ? config.ollamaBaseUrl
+      : PROVIDERS[provider]?.baseUrl;
   const keyList = Array.isArray(config.keys[provider]) ? config.keys[provider] : (config.keys[provider] ? [config.keys[provider]] : []);
   const keyCount = keyList.filter((k) => k && k.trim()).length;
   const apiKey = getActiveKey(provider, keyList);
@@ -364,6 +379,7 @@ module.exports = {
   PROVIDERS,
   MODEL_PRESETS,
   DEFAULT_CONFIG,
+  DEFAULT_OLLAMA_BASE_URL,
   loadConfig,
   saveConfig,
   resolveTarget,
